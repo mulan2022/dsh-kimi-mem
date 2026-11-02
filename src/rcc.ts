@@ -246,6 +246,17 @@ export interface RccBuildOptions {
   tailTurns: number;
   /** RCC 整块的字符预算；超出从**最旧的场**开始丢。 */
   maxChars: number;
+  /**
+   * 要从候选池里**先剔掉**的场（通常是当前会话自己）。
+   *
+   * 为什么要剔：RCC 的语义是"**别的**对话里我说过什么"。当前会话的话就在本轮上下文里，
+   * 再当历史端上来等于自我继承 —— 白吃预算，还会让模型把刚说过的话当成"过去的事"逐条处理。
+   * **真踩过（2026-10-30 用户当场发现）**：`rccDone` 是进程内存里的账本，harness 一重启
+   * 就清空，同一场的下一轮会**再注入一次** RCC，而那时本场的 turn 早已落盘建索引 → 自己进自己。
+   *
+   * **剔除必须在"取最近 N 场"之前** —— 否则剔完只剩 N-1 场，等于白丢一场历史。
+   */
+  excludeSessions?: readonly string[];
 }
 
 export interface RccBuildResult {
@@ -317,7 +328,10 @@ export function foldContained<T>(
  */
 export function buildRcc(db: DatabaseSync, opts: RccBuildOptions): RccBuildResult | null {
   const all = listSessions(db);
-  const recent = opts.sessions > 0 ? all.slice(-opts.sessions) : all;
+  // 先剔掉"当前的自己"，**再**取最近 N 场 —— 顺序反了会白丢一场历史。
+  const excluded = new Set(opts.excludeSessions ?? []);
+  const pool = excluded.size > 0 ? all.filter((row) => !excluded.has(row.session)) : all;
+  const recent = opts.sessions > 0 ? pool.slice(-opts.sessions) : pool;
   if (recent.length === 0) return null;
 
   const rendered = recent.map((row) => {

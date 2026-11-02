@@ -12,9 +12,14 @@
  * ```
  * ---
  * name: 意识之镜
- * kind: concept         # person|project|concept|place|self
- * status: ongoing       # active|ongoing|stuck|abandoned|done
- * aliases: 意识镜, 镜子
+ * tags:
+ *   - concept
+ *   - personal_project
+ * created: "2026-09-01"
+ * last_updated: "2026-10-30"
+ * aliases:
+ *   - 意识镜
+ *   - 镜子
  * ---
  * 正文…… [[相邻实体]]
  * ```
@@ -34,6 +39,8 @@ export interface EntityEntry {
   status: string;
   /** 别名，同样参与命中。 */
   aliases: string[];
+  /** Kimi-style entity tags; legacy pages may have none. */
+  tags: string[];
   /** `[[双链]]` 指向的目标名（顺链一跳用）。 */
   links: string[];
   body: string;
@@ -59,20 +66,22 @@ export function scanEntities(vaultDir: string): EntityEntry[] {
     const rel = `${VAULT.entitiesDir}/${file}`;
     const raw = readVaultFile(vaultDir, rel);
     if (raw === null) continue;
-    const { attrs, body } = parseFrontMatter(raw);
+    const { attrs, lists, body } = parseFrontMatter(raw);
     const fallbackName = file.replace(/\.md$/, '');
     const name = (attrs.name || fallbackName).trim();
     if (!name) continue;
-    const aliases = (attrs.aliases ?? '')
-      .split(/[,，]/)
+    const aliases = [...new Set((lists.aliases ?? (attrs.aliases ?? '').split(/[,，]/))
       .map((s) => s.trim())
-      .filter((s) => s.length >= MIN_NAME_LEN);
+      .filter((s) => s.length >= MIN_NAME_LEN))];
+    const tags = [...new Set((lists.tags ?? (attrs.tags ?? '').split(/[,，]/)).map(s => s.trim()).filter(Boolean))];
+    const typeTags = new Set(['person', 'project', 'concept', 'place', 'interest', 'event', 'organization', 'product', 'tool', 'pet', 'animal', 'self']);
     out.push({
       name,
       path: rel,
-      kind: attrs.kind ?? 'unknown',
+      kind: attrs.kind || tags.find(t => typeTags.has(t)) || 'unknown',
       status: attrs.status ?? 'active',
       aliases,
+      tags,
       links: extractLinks(body),
       body,
       vaultDir,
@@ -124,6 +133,7 @@ export function expandOneHop(
   const byName = new Map<string, EntityEntry>();
   for (const e of all) {
     byName.set(e.name, e);
+    byName.set(e.path.replace(/\.md$/, ''), e);
     for (const a of e.aliases) byName.set(a, e);
   }
 
@@ -163,6 +173,7 @@ export class EntityIndex {
   }
 
   rebuild(now = Date.now()): EntityEntry[] {
+    this.extras.clear();
     const all: EntityEntry[] = [];
     for (const dir of this.vaultDirs) all.push(...scanEntities(dir));
     this.entries = all;
@@ -233,7 +244,8 @@ export class EntityIndex {
 export function renderEntity(e: EntityEntry): string {
   const meta = [e.kind !== 'unknown' ? e.kind : '', e.status].filter(Boolean).join(' · ');
   const head = `### ${e.name}${meta ? `（${meta}）` : ''}`;
-  return `${head}\n${e.body.trim()}`;
+  const tags = e.tags?.length ? `标签：${e.tags.join('、')}\n` : '';
+  return `${head}\n${tags}${e.body.trim()}`;
 }
 
 /**

@@ -131,14 +131,9 @@ export function workspacesYamlPath(home: string): string {
 }
 
 /**
- * **未归属的原始素材**：`<home>/.dsh-mem/raw/`。
- *
- * 刻意放在 `shared/` 与 `spaces/` **之外** —— 它既不是全局记忆、也不是某个空间的记忆，
- * 而是"还没判断归属"的原始轮次。
- *
- * **为什么不按 cwd 分到各空间的 `raw/` 下**：那样等于**替 agent 把归属判完了**。
- * DSH 不支持给项目文件夹打 tag，归属只能靠内容判断 ——
- * 所以素材必须先中立地攒着，由 dream 派出的两个 agent 各自来认领。
+ * **统一保存的原始素材**：`<home>/.dsh-mem/raw/`。
+ * 原始轮次按会话集中存储，避免移动或复制事实源；preset 与工作区元数据决定归属。
+ * dream 按会话空间只派一个提取者，不再靠两个 agent 读内容后分别认领。
  */
 export function rawMaterialDir(home: string): string {
   return join(memRoot(home), 'raw');

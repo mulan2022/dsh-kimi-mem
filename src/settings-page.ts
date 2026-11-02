@@ -70,6 +70,35 @@ const CSS = `
 .dshmem_ins_del:hover{color:#f43f5e}
 .dshmem_ins_count{color:var(--dsw-alias-label-caption);font-size:11.5px;margin:0 0 6px}
 .dshmem_ins_warn{color:#f59e0b;font-size:11.5px;margin:0 0 6px}
+/* Import is a compact disclosure, independent of the two-column vault browser. */
+.dshmem_import{background:color-mix(in srgb,currentColor 2%,transparent);border:1px solid var(--dsw-alias-border-l3,#e1e4e8);border-radius:12px;min-width:0}
+.dshmem_import>summary{align-items:center;cursor:pointer;display:flex;gap:12px;list-style:none;padding:15px 18px;user-select:none}
+.dshmem_import>summary::-webkit-details-marker{display:none}
+.dshmem_import_icon{align-items:center;background:color-mix(in srgb,#4f6bed 9%,transparent);border-radius:9px;color:#637be4;display:flex;flex:none;height:36px;justify-content:center;width:36px}
+.dshmem_import_heading{display:flex;flex:1;flex-direction:column;gap:3px;min-width:0}
+.dshmem_import_title{color:var(--dsw-alias-label-primary,inherit);font-size:13px;font-weight:600;line-height:20px}
+.dshmem_import_subtitle{color:var(--dsw-alias-label-caption,#7c818b);font-size:11.5px;line-height:18px}
+.dshmem_import_chevron{color:var(--dsw-alias-label-caption,#7c818b);flex:none;transition:transform .15s ease}
+.dshmem_import[open] .dshmem_import_chevron{transform:rotate(180deg)}
+.dshmem_import_form{border-top:1px solid var(--dsw-alias-border-l3,#e1e4e8);display:flex;flex-direction:column;gap:10px;padding:16px 18px 18px}
+.dshmem_import_label{color:var(--dsw-alias-label-secondary,#59616e);font-size:12px;font-weight:500;line-height:18px}
+.dshmem_import_controls{align-items:stretch;display:flex;gap:8px;min-width:0}
+.dshmem_import_input{appearance:none;background:var(--dsw-alias-background-primary,transparent);border:1px solid var(--dsw-alias-border-l3,#d9dde4);border-radius:8px;box-sizing:border-box;color:inherit;flex:1;font-family:inherit;font-size:12px;line-height:20px;min-width:0;padding:9px 11px;transition:border-color .15s,box-shadow .15s}
+.dshmem_import_input::placeholder{color:var(--dsw-alias-label-caption,#9298a2)}
+.dshmem_import_input:focus{border-color:#6b81e9;box-shadow:0 0 0 3px #637be41a;outline:none}
+.dshmem_import_input[aria-invalid=true]{border-color:#df6571}
+.dshmem_import_button{align-items:center;appearance:none;background:#526cda;border:1px solid transparent;border-radius:8px;color:#fff;cursor:pointer;display:flex;flex:none;font-family:inherit;font-size:12px;font-weight:500;gap:6px;justify-content:center;line-height:20px;padding:9px 15px;transition:background .15s;white-space:nowrap}
+.dshmem_import_button:hover:not(:disabled){background:#445dc3}
+.dshmem_import_button:disabled{background:color-mix(in srgb,#526cda 35%,transparent);cursor:not-allowed}
+.dshmem_import_button:focus-visible,.dshmem_import>summary:focus-visible{outline:2px solid #6b81e9;outline-offset:3px}
+.dshmem_import_note{color:var(--dsw-alias-label-caption,#7c818b);font-size:11.5px;line-height:1.7;margin:0}
+.dshmem_import_status{border:1px solid transparent;border-radius:8px;font-size:12px;line-height:1.7;overflow-wrap:anywhere;padding:10px 12px}
+.dshmem_import_status p{font:inherit;margin:0}
+.dshmem_import_status p+p{font-size:11px;margin-top:3px;opacity:.85}
+.dshmem_import_status_loading{background:#637be40d;color:var(--dsw-alias-label-secondary,#59616e)}
+.dshmem_import_status_success{background:#22a06b0d;border-color:#22a06b26;color:#279367}
+.dshmem_import_status_error{background:#df65710d;border-color:#df657126;color:#cc5360}
+@media(max-width:560px){.dshmem_import>summary{padding:13px 14px}.dshmem_import_form{padding:14px}.dshmem_import_controls{flex-direction:column}.dshmem_import_button{align-self:flex-end}.dshmem_import_subtitle{font-size:11px}}
 `;
 
 const el = React.createElement;
@@ -115,7 +144,7 @@ function inline(text: string, keyBase: string, onEntity?: EntityLinkHandler): Re
     if (m.index > last) out.push(text.slice(last, m.index));
     const tok = m[0];
     if (tok.startsWith('[[')) {
-      const name = tok.slice(2, -2).trim();
+      const [name, label] = tok.slice(2, -2).split('|').map(s => s.trim());
       out.push(
         el(
           'a',
@@ -125,7 +154,7 @@ function inline(text: string, keyBase: string, onEntity?: EntityLinkHandler): Re
             title: `打开实体：${name}`,
             onClick: onEntity ? () => onEntity(name) : undefined,
           },
-          name,
+          label || name,
         ),
       );
     } else if (tok.startsWith('**')) {
@@ -354,9 +383,51 @@ export function WorkspacesPanel(): React.ReactElement {
   );
 }
 
+export function KimiImportPanel({ onImported }: { onImported: () => void }): React.ReactElement {
+  const [source, setSource] = React.useState('');
+  const [busy, setBusy] = React.useState(false);
+  const [status, setStatus] = React.useState<{ kind: 'loading' | 'success' | 'error'; text: string; detail?: string } | null>(null);
+  const run = async (): Promise<void> => {
+    setBusy(true);
+    setStatus({ kind: 'loading', text: '正在备份旧库并导入，请稍候…' });
+    try {
+      const response = await fetch('/dsh-mem/import-kimi', { method: 'POST', headers: {
+        'content-type': 'application/json', 'x-dsh-mem-import': 'overwrite-chat',
+      }, body: JSON.stringify({ source }) });
+      const data = await response.json() as { ok: boolean; error?: string; report?: { backup: string | null; entities: number } };
+      if (!response.ok || !data.ok) throw new Error(data.error || '导入失败');
+      setStatus({ kind: 'success', text: `导入完成，已载入 ${data.report?.entities ?? 0} 个实体。新建聊天会话即可使用。`,
+        detail: data.report?.backup ? `旧库备份：${data.report.backup}` : '此前没有聊天库，无需备份。' });
+      onImported();
+    } catch (error) { setStatus({ kind: 'error', text: error instanceof Error ? error.message : String(error) }); }
+    finally { setBusy(false); }
+  };
+  return el('details', { className: 'dshmem_import' },
+    el('summary', null,
+      el('span', { className: 'dshmem_import_icon', 'aria-hidden': true },
+        el('svg', { width: 18, height: 18, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.7, strokeLinecap: 'round', strokeLinejoin: 'round' },
+          el('path', { d: 'M12 3v12m-4-4 4 4 4-4M5 15v5h14v-5' }))),
+      el('span', { className: 'dshmem_import_heading' },
+        el('span', { className: 'dshmem_import_title' }, '导入 Kimi 记忆库'),
+        el('span', { className: 'dshmem_import_subtitle' }, '迁移聊天记忆，原聊天库自动备份')),
+      el('svg', { className: 'dshmem_import_chevron', width: 16, height: 16, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.7, 'aria-hidden': true },
+        el('path', { d: 'm7 10 5 5 5-5' }))),
+    el('form', { className: 'dshmem_import_form', onSubmit: (event: React.FormEvent) => { event.preventDefault(); if (!busy && source.trim()) void run(); }, 'aria-busy': busy },
+      el('label', { className: 'dshmem_import_label', htmlFor: 'dshmem-kimi-source' }, '记忆库文件夹'),
+        el('div', { className: 'dshmem_import_controls' },
+          el('input', { id: 'dshmem-kimi-source', className: 'dshmem_import_input', value: source, placeholder: '填写解压后的 kimi_memory_vault 文件夹路径', disabled: busy,
+            'aria-invalid': status?.kind === 'error', autoComplete: 'off', spellCheck: false,
+            onChange: (event: React.ChangeEvent<HTMLInputElement>) => { setSource(event.target.value); if (status?.kind === 'error') setStatus(null); } }),
+          el('button', { className: 'dshmem_import_button', type: 'submit', disabled: busy || !source.trim() }, busy ? '正在导入…' : '备份并导入')),
+      el('p', { className: 'dshmem_import_note' }, '只覆盖聊天记忆，常驻记忆与项目记忆保持原样。请先解压导出文件，再填写 DSH 所在电脑上的文件夹路径。'),
+      status ? el('div', { className: `dshmem_import_status dshmem_import_status_${status.kind}`, role: status.kind === 'error' ? 'alert' : 'status', 'aria-live': 'polite' },
+        el('p', null, status.text), status.detail ? el('p', null, status.detail) : null) : null));
+}
+
 export function MemorySpaceSection(): React.ReactElement {
   const [overview, setOverview] = React.useState<Overview | null>(null);
   const [space, setSpace] = React.useState<string>('instructions');
+  const [revision, setRevision] = React.useState(0);
   const [tree, setTree] = React.useState<TreeNode[]>([]);
   const [open, setOpen] = React.useState<Record<string, boolean>>({ sections: true, entities: true });
   const [file, setFile] = React.useState<{ rel: string; text: string } | null>(null);
@@ -390,7 +461,7 @@ export function MemorySpaceSection(): React.ReactElement {
         setEntityMap(map);
       })
       .catch(() => setEntityMap({}));
-  }, [space]);
+  }, [space, revision]);
 
   const openFile = React.useCallback(
     (rel: string) => {
@@ -406,7 +477,7 @@ export function MemorySpaceSection(): React.ReactElement {
   /** 点 `[[X]]`：先查实体目录，查不到再退回同名文件约定。 */
   const openEntity = React.useCallback(
     (name: string) => {
-      const rel = entityMap[name] ?? `entities/${name}.md`;
+      const rel = entityMap[name] ?? (name.includes('/') ? (/\.[a-z0-9]+$/i.test(name) ? name : `${name}.md`) : `entities/${name}.md`);
       openFile(rel);
     },
     [entityMap, openFile],
@@ -477,6 +548,7 @@ export function MemorySpaceSection(): React.ReactElement {
           el('span', { className: 'dshmem_muted' }, `索引 ${overview.indexEntries} 条`),
         )
       : el('p', { className: 'dshmem_muted' }, '正在读取…'),
+    space === 'chat' ? el(KimiImportPanel, { onImported: () => { setFile(null); setRevision(n => n + 1); getJson<Overview>('/dsh-mem/overview').then(setOverview).catch(e => setErr(String(e))); } }) : null,
     space === 'instructions'
       ? el('div', { className: 'dshmem_card' }, el('div', { className: 'dshmem_body' }, el(InstructionsPanel, null)))
       : el(

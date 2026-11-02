@@ -16,20 +16,21 @@
  *  RCC      聊天原文召回 + 补丁（§5.8）；原文归档与按指针取回（§5.9）
  *  P6       dream 调度内核 + 两段式编排 + `mem_dream` 工具
  *
- * 尚未实现：P6 的每晚定时路径与会话右键菜单「跳过整理」、P5 40 轮窗口铁律、
- * P7 三层晋升与冲突规则、P8 递归压缩、P9 锚点重访、P-1 检索测评集。
- * 已知缺口：项目分区的实体页进不了 `mem_entity` 的索引（见下方实体索引装配处）。
+ * 尚未实现：P5 40 轮窗口铁律、
+ * P7 画像归纳与冲突规则的完整验收、P8 递归压缩、P9 锚点重访、P-1 检索测评集。
  */
 import type { Context } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
 import { homedir } from 'node:os';
+import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 
 import { EntityIndex } from './entities.js';
+import { importKimiVault } from './import-kimi.js';
 import { closeIndex, listEntries, listSessions, openIndex, rebuildTurns, rebuildVault, setRccState } from './index-db.js';
-import { backfillRawTurns } from './history.js';
+import { backfillRawTurns, listSessionLogs } from './history.js';
 import { buildRcc, patchCandidates } from './rcc.js';
 import { installInjection, type InjectionLayer } from './inject.js';
 import {
@@ -51,8 +52,8 @@ import { installTimeline } from './timeline.js';
 import { installTurnCapture } from './turns.js';
 import { runDream } from './dream-run.js';
 import { dreamTool } from './tool-dream.js';
-import { listPendingSessions, readDreamSkip, setDreamSkip } from './dream.js';
-import { readState } from './state.js';
+import { acquireLease, recordFailure, recordSuccess, listPendingSessions, readDreamSkip, setDreamSkip, type DreamOutcome } from './dream.js';
+import { readState, updateState } from './state.js';
 import { registerMemTools, type ObserveSpace } from './tools.js';
 import {
   createVaultApi,
@@ -69,6 +70,7 @@ import { installDream, parseClock } from './dream.js';
 import { resolveWorkspace, wasAsked, markAsked, ensureRegistryFile, readRegistry } from './workspaces.js';
 
 export const name = 'dsh-mem';
+export { importKimiVault, inspectKimiVault } from './import-kimi.js';
 
 /**
  * 读随包发布的提示词模板：`<包根>/prompts/<name>.md`。
@@ -580,7 +582,7 @@ export async function apply(ctx: Context, rawConfig: unknown): Promise<void> {
     // 历史回填（§5.9）：`raw/turns/` 只覆盖插件在线期间的会话，把官方日志里
     // 没采过的补进来 —— 否则"最近 40 场"名不副实（实测 5/28）。
     // 日志只增不减 → 账本记字节数，没变过的会话直接跳过，不必每次解压几十 MB。
-    const backfill = backfillRawTurns(home);
+    const backfill = backfillRawTurns(home, resolved.projectRootMarkers);
     // 消息原文（§5.8 索引三层的第二层）：同样是派生索引，从 raw/turns/*.jsonl 重建。
     const turnsBuilt = rebuildTurns(db, home);
 
@@ -604,6 +606,7 @@ export async function apply(ctx: Context, rawConfig: unknown): Promise<void> {
       | ((ids: string[]) => { ok: boolean; started: boolean; text?: string; error?: string })
       | null = null;
     let dreamRunning = false;
+    let automaticDream: ((ids: string[]) => Promise<DreamOutcome>) | null = null;
 
     const dreamRoutes = {
       state: () => ({
@@ -623,9 +626,15 @@ export async function apply(ctx: Context, rawConfig: unknown): Promise<void> {
     };
 
     // 3) 记忆空间数据面（webServer 可能尚未就绪，内部会重试）。
-    //    只有 `/dream` 一条是写路由，且它动的是**整理调度**（跳过名单 / 现在跑一次），
-    //    不是记忆内容 —— 记忆正文依旧没有 HTTP 写入口。
+    //    dream 调度和用户触发的 Kimi 聊天库导入各有一条写路由。
+    //    常驻记忆仍仅由模型工具写入，导入不能改 shared 或 project。
     disposeRoutes = registerVaultRoutes(ctx, api, {
+      importKimi: (source) => {
+        if (dreamRunning) throw new Error('整理正在运行，请完成后重试');
+        const report = importKimiVault(home, source, db!);
+        entityIndex.rebuild();
+        return report;
+      },
       dream: dreamRoutes,
       workspaceView: () => ({
         registryPath: workspacesYamlPath(home),
@@ -642,8 +651,8 @@ export async function apply(ctx: Context, rawConfig: unknown): Promise<void> {
     });
 
     // 实体索引：注入与 mem_entity 工具**共用同一实例**。
-    // 只有常驻记忆层与聊天记忆是固定来源 —— **项目记忆整体不注入**，所以不在这里。
-    const entityIndex = new EntityIndex([sharedRootDir, chatDir]);
+    // 只有 shared 是公共来源；chat 通过当前会话的 resolveLayers 显式加入。
+    const entityIndex = new EntityIndex([sharedRootDir]);
 
     // 4) 模型工具：常驻记忆**唯一**的写入路径 + 观察 + 时间线 + 检索 + 实体。
     //    没有 HTTP 写接口，也没有可手动改的入口——这条约束由结构保证。
@@ -807,6 +816,7 @@ export async function apply(ctx: Context, rawConfig: unknown): Promise<void> {
 
     let dreamTimer: ReturnType<typeof setTimeout> | null = null;
     let dreamStopped = false;
+    const dreamAbort = new AbortController();
 
     const tryRegisterDream = (attempt: number): void => {
       if (dreamStopped) return;
@@ -817,8 +827,10 @@ export async function apply(ctx: Context, rawConfig: unknown): Promise<void> {
       if (subagents === undefined) {
         if (attempt >= 20) {
           ctx.logger.warn(
-            'dsh-mem: subagents 服务 20s 内未就绪 —— 「现在整理」未注册（定时那套不受影响）',
+            'dsh-mem: subagents 服务暂未就绪，自动与手动整理等待服务恢复，每 30 秒重试',
           );
+          dreamTimer = setTimeout(() => tryRegisterDream(attempt + 1), 30_000);
+          dreamTimer.unref?.();
           return;
         }
         dreamTimer = setTimeout(() => tryRegisterDream(attempt + 1), 1000);
@@ -829,13 +841,13 @@ export async function apply(ctx: Context, rawConfig: unknown): Promise<void> {
         pending: () => listPendingSessions(home, readState(home).dream.lastRunAt),
         skipped: () => readDreamSkip(home),
         setSkip: (sid: string, skip: boolean) => setDreamSkip(home, sid, skip),
-        run: async (sessionIds: string[], parent: unknown) => {
+        perform: async (sessionIds: string[], parent: unknown) => {
           const spawn = async ({ label, prompt }: { label: string; prompt: string }): Promise<string> => {
             const run = await subagents.start('spawn', {
               label,
               prompt: [{ type: 'text', text: prompt }],
               parent,
-              signal: new AbortController().signal,
+              signal: dreamAbort.signal,
             });
             try {
               const res = await run.result;
@@ -847,16 +859,49 @@ export async function apply(ctx: Context, rawConfig: unknown): Promise<void> {
               await run.dispose().catch(() => undefined);
             }
           };
-          // 汇总之前先把跨月滚动做掉，让阶段 B 看到的就是已经滚好的段落
-          // （阶段 B 是 agent 在写文件，宿主能确定完成的只有这一步前的准备）。
-          for (const dir of [sharedRootDir, chatDir, projectSpaceDir(home), ...projectEntryDirs(home)]) {
-            for (const r of rolloverMonthSections(dir, new Date())) {
-              ctx.logger.info(
-                `dsh-mem: 跨月滚动 ${r.from} → ${r.to}：${r.moved.map((m) => m.heading).join('、')}`,
-              );
+          const rolled = new Set<string>();
+          const prepareTarget = <T extends { dir: string }>(target: T): T => {
+            if (!rolled.has(target.dir)) {
+              rolloverMonthSections(target.dir, new Date());
+              rolled.add(target.dir);
             }
+            return target;
+          };
+          const logs = new Map(listSessionLogs(home).map(log => [log.session, log]));
+          return runDream({ home, logger: ctx.logger, spawn, template: loadPrompt,
+            resolveSession: (session, turns) => {
+              const last = turns.at(-1);
+              const log = logs.get(session);
+              const agents = ctx.get('agents') as unknown as { get?(id: string): unknown } | undefined;
+              const preset = presetOf(agents?.get?.(session)) ?? last?.agentPreset ?? log?.agentPreset ?? null;
+              const cwd = log?.cwd ?? last?.cwd ?? null;
+              if (!last && !log) throw new Error('没有会话归属信息');
+              if (!preset && !log && last?.space === 'chat') return prepareTarget({ kind: 'chat' as const, dir: chatDir, projectName: null });
+              const route = resolveWorkspace(home, cwd, resolved.projectRootMarkers, preset);
+              if (route.kind === 'chat') return prepareTarget({ kind: 'chat' as const, dir: chatDir, projectName: null });
+              if (!route.key || !route.root) throw new Error('无法确定目标项目，拒绝跨库整理');
+              const entry = ensureProjectEntry(home, route.key, route.root);
+              return prepareTarget({ kind: 'project' as const, dir: entry.dir, projectName: entry.name });
+            },
+          }, sessionIds);
+        },
+        run: async (sessionIds: string[], parent: unknown) => {
+          if (dreamRunning || !acquireLease(home, 'manual-dream')) throw new Error('已经有一次整理或导入在运行');
+          dreamRunning = true;
+          const startedAt = new Date();
+          const allPending = listPendingSessions(home, readState(home).dream.lastRunAt);
+          let outcome: DreamOutcome = 'error';
+          try {
+            const report = await dreamCap.perform(sessionIds, parent);
+            outcome = report.outcome;
+            if (outcome === 'ok') { refreshIndex(); entityIndex.rebuild(); }
+            return report;
+          } finally {
+            if (outcome === 'ok' && allPending.every(id => sessionIds.includes(id))) recordSuccess(home, startedAt);
+            else if (outcome === 'ok') updateState(home, state => { state.dream.lastOutcome = 'ok'; state.dream.lease = null; });
+            else recordFailure(home, outcome);
+            dreamRunning = false;
           }
-          return runDream({ home, logger: ctx.logger, spawn, template: loadPrompt }, sessionIds);
         },
       };
 
@@ -886,6 +931,41 @@ export async function apply(ctx: Context, rawConfig: unknown): Promise<void> {
         return null;
       };
 
+      // The scheduler owns the lease; use the same worker pipeline without taking it twice.
+      automaticDream = async (ids) => {
+        if (dreamRunning) throw new Error('另一次整理正在运行');
+        dreamRunning = true;
+        let owned: { agent: unknown; dispose(): Promise<void> } | undefined;
+        try {
+          let parent = resolveDreamParent(ids[0]);
+          if (parent === null) {
+            const agents = ctx.get('agents') as unknown as {
+              create(options: { sessionId: string; meta: { origin: 'subagent'; cwd: string; parentSession: string; agentPreset: string }; agentOptions: unknown; signal: AbortSignal;
+                setup(scope: { get(name: string): unknown }): Promise<void> }): Promise<{ agent: unknown; dispose(): Promise<void> }>;
+            } | undefined;
+            const model = ctx.get('agentDefaultModel') as unknown as { currentSelection(): unknown } | undefined;
+            if (!agents?.create || !model?.currentSelection) throw new Error('后台整理等待 agents / 默认模型服务就绪');
+            owned = await agents.create({
+              sessionId: `dsh-mem-dream-${randomUUID()}`,
+              meta: { origin: 'subagent', cwd: home, parentSession: ids[0], agentPreset: 'chat' },
+              agentOptions: model.currentSelection(),
+              signal: dreamAbort.signal,
+              setup: async scope => {
+                const presets = scope.get('agentPresets') as { mount(scope: unknown, id: string): Promise<unknown> } | undefined;
+                if (!presets?.mount) throw new Error('后台整理等待聊天 preset 服务就绪');
+                await presets.mount(scope, 'chat');
+              },
+            });
+            parent = owned.agent;
+          }
+          const report = await dreamCap.perform(ids, parent);
+          if (report.outcome === 'ok') { refreshIndex(); entityIndex.rebuild(); }
+          return report.outcome;
+        } finally {
+          try { await owned?.dispose(); } finally { dreamRunning = false; }
+        }
+      };
+
       dreamRunner = (ids: string[]) => {
         if (dreamRunning) {
           return { ok: false, started: false, error: '已经有一次整理在跑，等它结束' };
@@ -903,7 +983,6 @@ export async function apply(ctx: Context, rawConfig: unknown): Promise<void> {
             error: '当前没有活着的会话可以当父 agent —— 先打开任一会话再点',
           };
         }
-        dreamRunning = true;
         ctx.logger.info(`dsh-mem: 「现在整理」开始 —— ${target.length} 个会话`);
         void (async () => {
           try {
@@ -915,8 +994,6 @@ export async function apply(ctx: Context, rawConfig: unknown): Promise<void> {
             );
           } catch (e) {
             ctx.logger.warn(`dsh-mem: 「现在整理」失败: ${e instanceof Error ? e.message : String(e)}`);
-          } finally {
-            dreamRunning = false;
           }
         })();
         return { ok: true, started: true, text: `已开始整理 ${target.length} 个会话` };
@@ -939,6 +1016,7 @@ export async function apply(ctx: Context, rawConfig: unknown): Promise<void> {
       {
         sharedDir: sharedRootDir,
         index: entityIndex,
+        entityDirs: (cwd, preset) => [observeResolver(cwd, preset).dir],
         // 空间判定要读 preset（§4.2.7）：'chat' → 聊天空间。
         presetOf,
         observeResolver,
@@ -957,10 +1035,8 @@ export async function apply(ctx: Context, rawConfig: unknown): Promise<void> {
     );
 
     // 5) 注入：静态手册（system prompt，文本恒定）+ 动态记忆（pre-step，插在用户消息前）
-    //    实体索引只扫 shared / chat 两个固定 vault（v10：跨项目层已并入 shared）。
-    //    ⚠️ v10 之后 `resolveLayers` 对项目会话返回空，于是项目分区的实体
-    //    **既不在开局目录里、也进不了 `mem_entity` 的索引**（那个工具只吃这个索引）；
-    //    但注入的指针文案还在让模型用 `mem_entity` 翻项目实体页 —— 这条落差待定。
+    //    公共实体仅来自 shared；聊天实体只在聊天会话注入。
+    //    mem_entity 可显式查询 shared + 当前空间，项目实体仍不自动注入。
     disposeInjection = installInjection(
       ctx as unknown as Parameters<typeof installInjection>[0],
       {
@@ -976,7 +1052,7 @@ export async function apply(ctx: Context, rawConfig: unknown): Promise<void> {
         // 不是聊天空间就返回空，注入层不需要知道"哪些 preset 算聊天"。
         rcc: resolved.rcc
           ? {
-              build: (s: { cwd: string | null; agentPreset: string | null }) => {
+              build: (s: { id: string; cwd: string | null; agentPreset: string | null }) => {
                 if (db === null) return null;
                 const kind = resolveWorkspace(home, s.cwd, resolved.projectRootMarkers, s.agentPreset).kind;
                 if (kind !== 'chat') return null;
@@ -987,6 +1063,9 @@ export async function apply(ctx: Context, rawConfig: unknown): Promise<void> {
                   headTurns: resolved.rccHeadTurns,
                   tailTurns: resolved.rccTailTurns,
                   maxChars: resolved.rccMaxChars,
+                  // 本会话自己**不进** RCC：它的话已经在当前上下文里，当历史端上来就是自我继承。
+                  // 必须在这里剔（宿主才知道 sid），而且 buildRcc 里剔在"取最近 N 场"之前。
+                  excludeSessions: [s.id],
                 });
                 if (built === null) return null;
                 // 回写「哪些场进了 RCC」「其中哪些被裁过」—— 补丁链路每轮查它，
@@ -1044,7 +1123,8 @@ export async function apply(ctx: Context, rawConfig: unknown): Promise<void> {
     //      这是"对话中不碰记忆"能成立的前提：判断推迟到晚上，但素材不能丢。
     disposeTurns = installTurnCapture(
       ctx as unknown as Parameters<typeof installTurnCapture>[0],
-      { enabled: resolved.captureTurns, home },
+      { enabled: resolved.captureTurns, home, presetOf,
+        resolveSpace: (cwd, preset) => resolveWorkspace(home, cwd, resolved.projectRootMarkers, preset).kind },
     );
 
     // 7) 项目时间线（P4.5）：tools/result 抄 diff → 轮次结束聚合成一条摘要 + 详情文件。
@@ -1054,9 +1134,7 @@ export async function apply(ctx: Context, rawConfig: unknown): Promise<void> {
       { enabled: resolved.timeline, resolveVault: timelineResolver },
     );
 
-    // 6.6) dream（P6）的**调度内核**：每晚到点、闲置够了、有素材、没租约 → 才跑。
-    //      **编排（派 agent）还没实现**，所以 `run` 不传 —— `installDream` 会明确说
-    //      "调度器未启动"而不是空转一夜。判定逻辑已就绪，接上 run 即生效。
+    // 6.6) Every-night scheduler; resolve late services at execution time.
     disposeDream = installDream(
       ctx as unknown as Parameters<typeof installDream>[0],
       {
@@ -1065,11 +1143,16 @@ export async function apply(ctx: Context, rawConfig: unknown): Promise<void> {
         at: parseClock(resolved.dreamAt) ?? { hour: 3, minute: 0 },
         idleMinutes: resolved.dreamIdleMinutes,
         cooldownHours: resolved.dreamCooldownHours,
+        run: async (pending) => {
+          if (automaticDream === null) throw new Error('dream 执行服务尚未就绪，将在下次检查重试');
+          return automaticDream(pending);
+        },
       },
     );
 
     return () => {
       dreamStopped = true;
+      dreamAbort.abort();
       if (dreamTimer !== null) clearTimeout(dreamTimer);
       disposeDream?.();
       disposeDream = null;

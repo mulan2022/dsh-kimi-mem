@@ -119,7 +119,7 @@ const TEMPLATE_DIR: Record<VaultKind, string[]> = {
 export function ensureSpaceVault(dir: string, kind: VaultKind): string[] {
   const tmpl = TEMPLATE_DIR[kind];
 
-  const sectionsYaml = loadTemplate(...tmpl, VAULT.sectionsYaml);
+  const sectionsYaml = readVaultFile(dir, VAULT.sectionsYaml) ?? loadTemplate(...tmpl, VAULT.sectionsYaml);
   const readme = loadTemplate(...tmpl, VAULT.readme);
   const sections: SectionSpec[] = sectionsYaml ? parseSectionsYaml(sectionsYaml) : [];
 

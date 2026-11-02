@@ -57,7 +57,7 @@ export function parseSectionsYaml(text: string): SectionSpec[] {
         name: cur.name,
         file: cur.file,
         resident: cur.resident ?? false,
-        order: cur.order ?? 999,
+        order: cur.order ?? out.length * 10,
         ...(cur.window === undefined ? {} : { window: cur.window }),
         hint: cur.hint ?? '',
       });
@@ -99,10 +99,14 @@ export function parseSectionsYaml(text: string): SectionSpec[] {
     if (!cur) cur = {};
     switch (key) {
       case 'name':
+      case 'title':
         cur.name = unquote(value);
         break;
       case 'file':
+      case 'path':
         cur.file = unquote(value);
+        // Kimi canonical sections are resident unless explicitly overridden.
+        if (key === 'path' && cur.resident === undefined) cur.resident = true;
         break;
       case 'resident':
         cur.resident = /^true$/i.test(unquote(value));
@@ -126,6 +130,13 @@ export function parseSectionsYaml(text: string): SectionSpec[] {
   }
 }
 
+/** Kimi's per-vault injection budget; absent in legacy dsh templates. */
+export function sectionInjectCap(text: string): number | null {
+  const match = /^inject_char_cap:\s*(\d+)\s*$/m.exec(text);
+  const cap = match ? Number(match[1]) : 0;
+  return cap > 0 && Number.isSafeInteger(cap) ? cap : null;
+}
+
 /** 为一个 section 生成初始文件内容（仅在文件不存在时写入）。 */
 export function seedSectionFile(spec: SectionSpec): string {
   const head = spec.hint ? `<!-- ${spec.hint} -->\n\n` : '';
@@ -135,12 +146,14 @@ export function seedSectionFile(spec: SectionSpec): string {
 /** observations.md / log.md 的初始骨架。 */
 export function seedObservations(): string {
   return [
-    '# 待确证观察（暂存区）',
+    '# 观察总结',
     '',
-    '信号还不够强、只出现过一次、尚未被证实的观察写在这里。',
+    '保存有解释与复用价值的观察：用户在什么情境下怎样反应或取舍、什么支持方式有效，以及证据、适用边界与反例。',
+    '项目分区中的本文件仅记录该项目有价值的工程判断与协作模式，和聊天画像分开。',
     '',
     '**本文件的内容不会被主动注入上下文**，也不会进 `README.md`。',
-    '后续 dream 若发现某条被反复印证，会把它晋升到 `sections/` 或 `entities/`。',
+    '观察本身就是记忆，不是低置信度事实的暂存区；稳定且值得常驻的总结可另行并入 sections。',
+    '没有提炼价值的内容保留在原始轮次中，由 RCC / BM25 按需召回，不必另写观察。',
     '',
     '---',
     '',

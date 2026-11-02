@@ -41,10 +41,11 @@ export interface TurnRecord {
   /** 轮次号；取不到为 null。 */
   turn: number | null;
   at: string;
-  /** 工作目录 —— dream 靠它判断内容该归哪个空间。 */
+  /** 工作目录 —— 与 preset 一起用于确定目标项目。 */
   cwd: string | null;
-  /** 当时判定出来的空间。**只是"当时"，内容归属由 dream 再判**。 */
+  /** 当时按会话 preset / 工作区判定的空间。 */
   space: 'chat' | 'project';
+  agentPreset?: string;
   /** 本轮用户说的话。 */
   user: string;
   /** 本轮助手的文本。 */
@@ -253,6 +254,8 @@ export interface TurnCaptureInput {
   enabled: boolean;
   /** dsh home —— 素材落在 `<home>/.dsh-mem/raw/turns/`，**中立位置，不按空间分**。 */
   home: string;
+  presetOf?: (agent: unknown) => string | null;
+  resolveSpace?: (cwd: string | null, preset: string | null) => 'chat' | 'project';
 }
 
 interface TurnCaptureCtx {
@@ -289,11 +292,11 @@ export function installTurnCapture(ctx: TurnCaptureCtx, input: TurnCaptureInput)
       const header = (agent as { session?: { header?: { cwd?: unknown } } }).session?.header;
       const cwd = typeof header?.cwd === 'string' && header.cwd.length > 0 ? header.cwd : null;
 
-      // `space` 只记"当时按 cwd 判成了什么" —— 它是**线索不是结论**。
-      // 真正的归属由 dream 的两个 agent 按内容判断（项目目录里的闲聊该进聊天区）。
-      const space: 'chat' | 'project' = cwd === null ? 'chat' : 'project';
+      const preset = input.presetOf?.(agent) ?? null;
+      const space = input.resolveSpace?.(cwd, preset) ?? (cwd === null ? 'chat' : 'project');
       const rec = collectTurn(events, { session: sid, cwd, space, home: input.home });
       if (rec === null) return;
+      if (preset) rec.agentPreset = preset;
       if (!appendTurn(input.home, rec)) {
         ctx.logger.warn('dsh-mem: 原始轮次写入失败（不影响本轮）');
       }

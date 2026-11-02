@@ -153,7 +153,7 @@ const disposeRoutes = registerVaultRoutes(routeCtx, mod.createVaultApi(
 ));
 await new Promise((r) => setTimeout(r, 50)); // registerVaultRoutes 是同步尝试 + 可能重试
 
-check('注册了 7 条路由', registered.length === 7, registered.map((r) => r.path).join(', '));
+check('注册了 8 条路由', registered.length === 8, registered.map((r) => r.path).join(', '));
 check('路由前缀为 /dsh-mem', registered.every((r) => r.path.startsWith('/dsh-mem/')));
 
 /** 触发一次 handler 并收集响应。 */
@@ -444,7 +444,7 @@ check('kind != enter 时原样返回', rejected.kind === 'reject');
 
 // ---- 压缩后重新注入 ----
 const sessionEvents = listeners['session/event'] ?? [];
-check('注册了 session/event 监听器', sessionEvents.length === 1, String(sessionEvents.length));
+check('注册了注入和 dream 活跃度的 session/event 监听器', sessionEvents.length === 2, String(sessionEvents.length));
 
 const rC2 = await callPreStep([userMsg], 'sess-C');
 check('压缩前仍不重复注入', rC2.messages.length === 1, String(rC2.messages.length));
@@ -1887,7 +1887,7 @@ check(
   '回填按时间正序（更早的轮次追加在后面也要排对）',
   mod.readTurns(hist, 'session-aaa').map((t) => t.turn).join(',') === '1,2',
 );
-check('回填记下空间线索（有 cwd → project）', mod.readTurns(hist, 'session-aaa')[0].space === 'project');
+check('回填空间沿用工作区判定（无项目标记的未登记目录 → chat）', mod.readTurns(hist, 'session-aaa')[0].space === 'chat');
 const backfill2 = mod.backfillRawTurns(hist);
 check('★ 第二次回填跳过（日志字节数没变 → 不必再解压）', backfill2.added === 0 && backfill2.skipped === 1, JSON.stringify(backfill2));
 
@@ -2114,6 +2114,27 @@ check(
 check('正文带场号', rccBuilt.text.includes('1. ') && rccBuilt.text.includes('3. '));
 check('正文逐字带用户发言（不是摘要）', rccBuilt.text.includes('机票价格比较'));
 check('没超总量预算时不丢场', rccBuilt.dropped.length === 0);
+
+// ★ 当前会话自己必须被剔掉（2026-10-30 用户当场发现）：RCC 的语义是"**别的**对话里我说过什么"。
+//   不剔的话，harness 一重启（rccDone 是进程内存的账本）就会把本场已落盘的话当历史再端上来。
+const rccSelf = mod.buildRcc(rccDb, { sessions: 4, ...rccCut, maxChars: 100000, excludeSessions: ['rcc-s4'] });
+check(
+  '★ 排除当前场：自己不出现在 RCC 里',
+  rccSelf.covered.length === 3 && !rccSelf.covered.includes('rcc-s4'),
+  JSON.stringify(rccSelf.covered),
+);
+const rccSelf2 = mod.buildRcc(rccDb, { sessions: 2, ...rccCut, maxChars: 100000, excludeSessions: ['rcc-s4'] });
+check(
+  '★ 剔除发生在【取最近 N 场】之前（剔完仍要取满 2 场，不能白丢一场历史）',
+  JSON.stringify(rccSelf2.covered) === JSON.stringify(['rcc-s2', 'rcc-s3']),
+  JSON.stringify(rccSelf2.covered),
+);
+check(
+  '排除后正文里也没有那个场号对应的自己',
+  !rccSelf.text.includes('开头甲在这里'),
+  `${rccSelf.covered.length} 场`,
+);
+
 const rccTight = mod.buildRcc(rccDb, { sessions: 4, ...rccCut, maxChars: 200 });
 check(
   '★ 总量超预算从【最旧】的场开始丢（最旧的最短 → 证明按年龄而不是按大小）',

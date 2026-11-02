@@ -266,8 +266,9 @@ export function installDream(ctx: DreamCtx, input: DreamInput): () => void {
   // 活跃度：**只认真实用户消息**。
   // 第 5 条防御 —— 如果连插件自己的消息（注入快照、反思指令）也算活跃，
   // 那 dream 一跑就把自己唤醒，窗口永远年轻，永远跑不起来。
-  let lastActivityAt = 0;
-  ctx.on('session/event', ((_session: unknown, event: unknown) => {
+  let lastActivityAt = Date.now();
+  const disposeActivity = ctx.on('session/event', ((_session: unknown, event: unknown) => {
+    if ((_session as { header?: { origin?: string } } | undefined)?.header?.origin === 'subagent') return;
     const e = event as { type?: unknown; data?: { source?: { kind?: unknown } } } | undefined;
     if (e?.type !== 'user/message') return;
     if (e.data?.source?.kind !== 'user') return;
@@ -296,7 +297,7 @@ export function installDream(ctx: DreamCtx, input: DreamInput): () => void {
     }
 
     if (outcome === 'ok') {
-      recordSuccess(input.home);
+      recordSuccess(input.home, now);
       ctx.logger.info('dsh-mem: dream 完成');
     } else {
       // 失败/中止：**只释放租约，不写 lastRunAt** —— 下个周期还会重试。
@@ -307,7 +308,7 @@ export function installDream(ctx: DreamCtx, input: DreamInput): () => void {
   };
 
   const timer = setInterval(() => {
-    void tick();
+    void tick().catch(e => ctx.logger.warn(`dsh-mem: 调度检查失败，下周期重试：${String(e)}`));
   }, input.tickMs ?? 5 * 60_000);
   // 不要让这个定时器拖住进程退出
   (timer as unknown as { unref?: () => void }).unref?.();
@@ -319,5 +320,6 @@ export function installDream(ctx: DreamCtx, input: DreamInput): () => void {
 
   return () => {
     clearInterval(timer);
+    if (typeof disposeActivity === 'function') disposeActivity();
   };
 }

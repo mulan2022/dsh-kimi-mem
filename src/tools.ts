@@ -6,9 +6,8 @@
  *    不由人手动编辑文件，也不由 AI 自作主张添加。把写入口收敛成工具、删掉 HTTP 写路由，
  *    这条约束就由**结构**保证，而不是靠"约定别乱写"（同"隔离靠硬代码"的原则）。
  *
- * ② 待确证观察（B 层，P4）：耐久事实的暂存区。与 ① 的关键差别是
- *    **它不常驻注入**，所以往里写不需要"用户明说"这个前提 —— 但代价是
- *    每条必须带来源锚点，且可能永远不被晋升。
+ * ② 观察总结（P4）：有解释价值的行为模式，不是耐久事实或弱信号的暂存区。
+ *    不常驻注入，每条带来源锚点；日常提炼交给 dream，工具限用户要求或纠错时使用。
  *
  * ③ 实体查阅（P3）：vault 是文档而非原子事实，开局只给**名字目录**，
  *    正文按需翻 —— 照搬"文献综述看到引用再去翻原文"。
@@ -64,6 +63,8 @@ export interface ToolContext {
   sharedDir: string;
   /** 实体索引 —— 与注入共用同一个实例，避免两边扫出不同结果。 */
   index?: EntityIndex;
+  /** Explicit entity lookup may read shared + current space only. */
+  entityDirs?: (cwd: string | null, agentPreset?: string | null) => string[];
   /**
    * 读当前会话的 agent preset id（§4.2.7）：`'chat'` → 聊天空间。
    * 由宿主提供（读 `sessionProjections` 的 `agentPreset` 投影）。
@@ -71,7 +72,7 @@ export interface ToolContext {
    */
   presetOf?: (agent: unknown) => string | null;
   /**
-   * 待确证观察的落点解析：答"这是关于**谁**的事实"。
+   * 观察总结的落点解析：答"这个观察归属哪个空间"。
    * 不提供时 `mem_observe` 一律拒绝写入。
    */
   observeResolver?: (cwd: string | null, agentPreset?: string | null) => ObserveSpace;
@@ -233,13 +234,13 @@ function forgetTool(sharedDir: string): ToolDefinition {
 
 const OBSERVE_REASON: Record<string, string> = {
   empty: '内容不能为空。',
-  duplicate: '这条已经在待确证观察里了，无需重复写入。',
+  duplicate: '这条已经在观察总结里了，无需重复写入。',
   'no-anchor': '拿不到来源锚点，拒绝写入 —— 查不到出处的记忆不如不记。',
   'write-failed': '写入失败（vault 不可写）。',
 };
 
 /**
- * 待确证观察（P4）。
+ * 观察总结（P4）。
  *
  * **v11 起它的定位变了**：不再是"轮次结束顺手记一笔"的日常出口。
  * 用户拍板：「不要在对话过程中频繁改动 memory，这个工具**除非用户要求改
@@ -250,7 +251,7 @@ function observeTool(ctx: ToolContext): ToolDefinition {
   return {
     name: TOOL_OBSERVE,
     description: [
-      '写入一条**待确证观察**：关于用户 / 项目 / 你自己的耐久事实。',
+      '写入一条**有解释价值的观察总结**：用户行为方式，或当前项目的工程判断与协作模式。',
       '',
       '## 什么时候才调用它（**重要**）',
       '',
@@ -266,8 +267,9 @@ function observeTool(ctx: ToolContext): ToolDefinition {
       '',
       '## 它是什么',
       '',
-      '暂存区：**不会被主动注入上下文**，也不进 README；',
-      '后续整理若发现它被反复印证，才会晋升成正式记忆。',
+      '观察本身就是有价值的记忆，按需检索，**不会被主动注入上下文**，也不直接拼进 README。',
+      '写清情境、反应或取舍、证据和推断边界；不必等用户逐字确认，但不能凭空编解释。',
+      '身份事实直接整理进 sections/entities；无解释价值的琐事留在原始轮次供 RCC / BM25 召回。',
       '',
       '**每条观察都会自动带上来源锚点**（当前会话 + 轮次），',
       '拿不到来源时会拒绝写入 —— 这是刻意的，查不到出处的记忆不如不记。',
@@ -281,7 +283,7 @@ function observeTool(ctx: ToolContext): ToolDefinition {
       properties: {
         text: {
           type: 'string',
-          description: '一条耐久事实。写成单行、自包含的陈述，脱离当前上下文也看得懂。',
+          description: '一个有价值的行为模式：情境、反应或取舍、解释及边界。写成单行段落，可含数句，并由真实来源支持。',
         },
       },
     },
@@ -300,14 +302,14 @@ function observeTool(ctx: ToolContext): ToolDefinition {
       },
       render: (_args, value) => {
         const v = value as { ok?: unknown; count?: unknown; reason?: unknown; anchorId?: unknown; space?: unknown };
-        if (!v.ok) return [{ type: 'text' as const, text: `未写入待确证观察：${String(v.reason ?? '未知原因')}` }];
+        if (!v.ok) return [{ type: 'text' as const, text: `未写入观察总结：${String(v.reason ?? '未知原因')}` }];
         return [
           {
             type: 'text' as const,
             text:
-              `已写入待确证观察（${String(v.space ?? '')}空间，共 ${String(v.count)} 条，` +
+              `已写入观察总结（${String(v.space ?? '')}空间，共 ${String(v.count)} 条，` +
               `来源锚点 [^${String(v.anchorId ?? '')}]）。\n` +
-              '注意：它不会主动注入上下文，要等整理环节确证后才会晋升。',
+              '观察已保存，可按需检索，不会主动注入上下文。',
           },
         ];
       },
@@ -738,7 +740,7 @@ export function snapshot(sharedDir: string): { items: string[]; max: number } {
  * 会话开始时注入的只是**名字目录**；正文要主动来取。这就是"看到引用再去翻原文"。
  * 顺带把一跳邻居也带上 —— 提到 A 时，A 链到的 B 往往正是下一步需要的。
  */
-function entityTool(index: EntityIndex): ToolDefinition {
+function entityTool(index: EntityIndex, ctx: ToolContext): ToolDefinition {
   return {
     name: TOOL_ENTITY,
     description: [
@@ -778,7 +780,7 @@ function entityTool(index: EntityIndex): ToolDefinition {
         ];
       },
     },
-    async execute(args: unknown): Promise<{
+    async execute(args: unknown, exec?: ToolExecLike): Promise<{
       ok: boolean;
       name: string;
       text: string;
@@ -789,7 +791,8 @@ function entityTool(index: EntityIndex): ToolDefinition {
       const name = typeof parsed.name === 'string' ? parsed.name.trim() : '';
       if (!name) return { ok: false, name: '', text: '', reason: 'name 不能为空。' };
 
-      const all = index.rebuild();
+      index.rebuild();
+      const all = index.all(ctx.entityDirs?.(sessionCwdOf(exec?.agent), ctx.presetOf?.(exec?.agent) ?? null) ?? []);
       // 主名或别名命中
       const target =
         all.find((e) => e.name === name) ?? all.find((e) => e.aliases.includes(name)) ?? null;
@@ -830,5 +833,5 @@ export function registerMemTools(
   register(diffTool(ctx));
   register(searchTool(ctx));
   register(spaceTool(ctx));
-  if (ctx.index) register(entityTool(ctx.index));
+  if (ctx.index) register(entityTool(ctx.index, ctx));
 }

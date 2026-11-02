@@ -1,10 +1,10 @@
 /**
  * Vault：markdown 文件是**唯一事实源**，SQLite 只是可重建的派生索引。
  *
- * 设计文档 §4 / §3 的三层置信度：
+ * 按用途分流，不要求素材逐级晋升：
  *   raw/               原始素材（未加工）
- *   observations.md    暂存区：信号弱、未确证 —— 不常驻、不进 README
- *   sections/ entities/ + README.md + index.md   确证区
+ *   observations.md    有解释价值的行为观察 —— 不常驻，支持按需检索
+ *   sections/ entities/ + README.md + index.md   画像、实体及其派生入口
  *
  * 本模块只负责**文件层的读写与目录约定**，不做任何语义加工。
  */

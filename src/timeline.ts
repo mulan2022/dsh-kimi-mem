@@ -7,7 +7,7 @@
  * raw/timeline/<id>.md    详情：完整 FileDiff 的改前 / 改后
  * ```
  *
- * 这与「三层置信度」「来源锚点」共用同一个结构（第一层粗粒度 + 指针 → 第二层按需取），
+ * 这与「来源锚点」共用同一个结构（第一层粗粒度 + 指针 → 第二层按需取），
  * 所以指针机制也共用 `anchors.ts` 的同一张 ids 表 —— 只是 `kind='diff'` 时
  * 详情落在 `raw/timeline/<id>.md`（见 `detailPathFor`）。
  *

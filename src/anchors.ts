@@ -26,6 +26,8 @@ export interface Anchor {
   at: string;
   /** 这条锚点记的是什么类型的写入（observe / instruction / …）。 */
   kind: string;
+  /** Imported citation: original conversation is absent from the export. */
+  external?: { provider: 'kimi'; sourceRef: number; originalAvailable: false };
 }
 
 /** 锚点表在 vault 内的相对路径。放在 raw/ —— 它本来就是"未加工的原始素材"。 */
@@ -81,6 +83,7 @@ export function readAnchors(vaultDir: string): Anchor[] {
         turn: typeof o.turn === 'number' && Number.isFinite(o.turn) ? o.turn : 0,
         at: typeof o.at === 'string' ? o.at : '',
         kind: typeof o.kind === 'string' ? o.kind : 'unknown',
+        ...(o.kind === 'kimi-import' ? { external: { provider: 'kimi' as const, sourceRef: id, originalAvailable: false as const } } : {}),
       });
     } catch {
       /* 坏行跳过 */
@@ -124,5 +127,6 @@ export function detailPathFor(a: Anchor): string | null {
 
 /** 锚点的一行人类可读描述（写入工具回执与将来的"锚点重访"都用它）。 */
 export function describeAnchor(a: Anchor): string {
+  if (a.external) return `Kimi source_ref ${a.external.sourceRef} · 原始会话未随导出提供`;
   return `${a.session.slice(0, 8)} · turn ${a.turn} · ${a.at}`;
 }

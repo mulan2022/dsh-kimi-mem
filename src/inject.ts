@@ -52,8 +52,11 @@ const patchedRcc = new Map<string, Set<string>>();
  * 两个钩子**自己判空间**，不是聊天空间就返回空；所以注入层不需要知道 preset 那些事。
  */
 export interface RccHooks {
-  /** 会话首轮：拼一份 RCC 正文（只在聊天空间返回非 null）。 */
-  build(session: { cwd: string | null; agentPreset: string | null }): string | null;
+  /**
+   * 会话首轮：拼一份 RCC 正文（只在聊天空间返回非 null）。
+   * `id` 是**当前会话**——宿主要把它从候选池里剔掉，否则本场会把自己当历史端上来。
+   */
+  build(session: { id: string; cwd: string | null; agentPreset: string | null }): string | null;
   /** 每轮：给若干条补丁候选。去重账本在**注入层**（那是会话状态），这里只算分。 */
   patch(
     session: { cwd: string | null; agentPreset: string | null },
@@ -79,20 +82,20 @@ export function buildGuide(): string {
   return [
     '## 记忆空间（dsh-mem）',
     '',
-    '你有一个跨会话的记忆空间，存储在本地 markdown vault 里。分两层：',
+    '你有一个跨会话的记忆空间，存储在本地 markdown vault 里，按用途保存：',
     '',
     '- **常驻记忆**：用户明确要求你始终记住的条目。每个会话都会注入到你的上下文里，',
     '  并且不参与自动整理 —— 自动整理清库时绝不会动它们。',
-    '- **待确证观察**：轮次结束时你可能会收到一条 `[mem-reflect]` 指令，让你判断这一轮',
-    '  有没有值得长期留下的东西。关于用户/项目/你自己的耐久事实写进这一层。',
-    '  它**不会**被注入上下文，要等整理环节确证后才会晋升成正式记忆。',
+    '- **行为观察**：模型对用户行为方式的有价值总结，包含情境、反应或取舍、证据与边界。',
+    '  它本身就是记忆，按需检索，不作为普通事实或弱信号的暂存区。项目分析仍留在项目分区。',
+    '  没有提炼价值的内容留在原始轮次，由 RCC / BM25 按需召回；身份事实可直接整理进 sections/entities。',
     '',
     '工具：',
     '',
     '- `mem_remember` —— **只在用户明确要求时调用**，例如「记住 X」「别忘了 X」。',
     '  写入后该条目会进入常驻记忆，此后每个会话都能看到。',
     '- `mem_forget` —— **只在用户明确要求时调用**，例如「忘掉 X」。',
-    '- `mem_observe` —— 写入待确证观察。耐久事实即可写，不必等用户明说；',
+    '- `mem_observe` —— 写入有解释力的行为观察；仅在用户要求或纠正已有记忆冲突时使用，日常提炼交给 dream。',
     '  每条会自动带上来源锚点，拿不到来源时会拒绝写入。',
     '- `mem_entity` —— 按名字查阅实体页正文。',
     '- `mem_diff` —— 按 `[→ id]` 取某一条项目时间线的**完整改动**。',
@@ -444,7 +447,7 @@ export function installInjection(ctx: InjectionCtx, input: InjectionInput): () =
     //     只在**聊天空间**注入：两个钩子自己判空间，不是聊天就返回空。
     if (sid && input.rcc && !rccDone.has(sid)) {
       rccDone.add(sid);
-      const rccText = input.rcc.build({ cwd, agentPreset: preset });
+      const rccText = input.rcc.build({ id: sid, cwd, agentPreset: preset });
       if (rccText !== null) {
         // 一定要带框：`form: 'recall'` 只影响前端的折叠，模型看到的就是这串原话本身。
         // 没有 `RCC_HEADER` 的话，几场之前的原话会被当成"用户这一轮说的话"去逐条处理。

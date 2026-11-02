@@ -1,86 +1,106 @@
-# dsh-mem
+# dsh-kimi-mem
 
-给 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的跨会话记忆插件。
+给 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 做的跨会话记忆插件，原名 **dsh-mem**。
+
+虽然 DSH 的记忆插件已经有不少了，还是想做一个适合聊天、愿意把 token 花在聊天体验上的。起因是 Kimi 客户端的跨对话记忆用起来太顺手：换个窗口，它还知道你是谁，也接得上之前聊过的事。我想在 DSH 里复刻这种连续感，于是有了这个项目。
+
+这个项目的主要参考是 **Kimi 客户端的记忆体验，以及我自己能看到、导出的记忆库**。所谓“逆向”，就是看文件结构、观察交互表现、做实验，再靠猜测写自己的实现；有问题也会直接问 Kimi——有时它还真会说一点。😏 这些观察不能证明它的内部机制，项目采用的窗口、预算、调度和整理规则都是这里自己的实现，不保证与 Kimi 生产系统一致。
 
 ![记忆空间：常驻记忆 / 聊天记忆 / 项目记忆](docs/images/memory-space.png)
 
-**聊天记忆**这一层是照着 Kimi 客户端的记忆系统复刻的：40 场滚动原文（RCC）+ dream 整理 +
-50 条硬性常驻记忆，再加上 BM25 top-k 命中注入。好处是跨对话聊天很顺滑 —— 换个会话它还记得
-你是谁、上次聊到哪。坏处是**很耗 token**：每场会话注入一次，现在约 8500 字（约 5k token）；
-素材攒到 40 场时约 1.8 万字（约 11k token）。
+**已经有 Kimi 记忆库？可以[一键导入聊天记忆](#一键导入-kimi-记忆库)，旧聊天库会自动备份。**
 
-**dream 每晚 03:00 跑一次**，只处理有新素材的会话，而且是**增量**的：一场会话只在第一次
-被整理时整场读一遍，顺便留一份对话摘要；下一晚只喂「那份摘要 + 之后新增的轮次」，不再
-重读全部（照 Claude Code 的 compact 那套）。所以成本差得很开 —— 有整场要读的那晚
-**十几到二十几万 token**，只有新增的那晚**几万**。
-
-**聊天记忆必须用「聊天模式」才有。** 不选它，会话一律按项目处理 —— 聊天记忆那一套（RCC、
-常驻注入）**完全不会加载**，你说过的话也进不了聊天空间。这是故意的：免得聊天那套影响正常
-项目。**项目记忆之间也互不相通**（A 项目的记忆不会进 B 项目的上下文），但可以主动查询：
-跨对话查所有项目的进度和具体改动。
-
-## 装
+## 装起来
 
 ```sh
-dsh plugin --profile web add github:mulan2022/dsh-mem
+dsh plugin --profile web add github:mulan2022/dsh-kimi-mem
 ```
 
-重启 `dsh web` 即可。
+重启 `dsh web`，新建会话时选择 **聊天模式**。
 
-> npm 上那个 `dsh-mem` 是别人写的另一个插件，**不要**用 `dsh plugin add dsh-mem`。
+![在会话里选聊天模式](docs/images/chat-mode.png)
 
-> ⚠️ **没有「聊天模式」就没有聊天记忆。** 这是最容易踩的一点：插件装好了、一直在用标准模式，
-> 聊天区会永远是空的 —— 因为聊天空间是按**会话的 preset 身份**认的，不是按目录、也不是按开关。
-> **每个想记进聊天记忆的会话，都得选「聊天模式」。**
+**仓库改名，现有安装兼容。** 内部包名、插件 ID 仍是 `dsh-mem`，工具仍是 `mem_*`，数据仍在 `~/.dsh/.dsh-mem/`。已有安装不需要改名或搬数据；这次改名本身不会更新旧安装的代码。配置、卸载和本地软链也继续使用 `dsh-mem`。
 
-「聊天模式」随插件一起装，不用再手动建目录：本包的 `cordis.patch.yml` 里有一行
-`@deepseek-ai/dsh-agent-preset` 声明（`id: chat`），装完重启 `dsh web`，新建会话时
-模式菜单里就有它。
+请使用上面的 GitHub 安装方式。npm 上同名的 `dsh-mem` 是另一个项目。
 
-![在会话里选「聊天模式」](docs/images/chat-mode.png)
+## 聊天记忆怎么工作
 
-> 老版本（DSH 0.1.x）是往 `~/.dsh/.agent-presets/chat/` 抄两个文件的。0.2 起那个目录
-> **不再被读**，preset 只能是 bundle 补丁里的一行声明 —— 所以这份仓库里也不再有 `presets/`。
-> 已经建过那个目录的，删掉即可（它现在只是个死文件）。
+本插件把几条路径叠在一起：
 
-选上「聊天模式」的会话会带着记忆空间 + 技能目录 + shell 与文件读写。
+| 路径 | 做什么 |
+| --- | --- |
+| RCC 滚动原文 | 默认覆盖最近 40 场聊天，带入经过截取的用户原话，保留最近聊过什么的连续感 |
+| 常驻记忆 | 最多 50 条用户明确要求记住的内容，每场会话注入，写满会报错，不自动淘汰 |
+| dream 整理 | 把会话提炼成用户画像、行为观察和实体页，后续跨会话继续使用 |
+| 检索与原文补丁 | 用实体名精确匹配、BM25 检索找相关记忆，必要时补回 RCC 裁掉的那一轮原话 |
 
-## 它记什么
+**BM25 召回和原文补丁是我另外加的设计**，不是对 Kimi 实现的断言。整理提示词、增量摘要、项目隔离与改动时间线也由本项目实现。
 
-**项目里的改动都记在账上。** `write` / `edit` 的 diff 被自动抄下来，一轮一行摘要加一个
-指针，详情等 AI 判断"这次改动还影响现在"时才翻。项目会话只给一行提示说"你的记忆不在
-上下文里，用工具取" —— 项目细节量大，全塞进去既贵又吵。
+`observations.md` 保存的是模型对用户行为方式的观察总结：什么情境下怎样反应或取舍、什么支持方式有效、证据和适用边界是什么。身份事实和实体资料按用途直接整理；没有提炼价值的碎屑留在原始轮次里，按需召回。
 
-**一个会话算聊天还是项目**，按 agent preset → 工作区登记表 → 仓库标记（默认 `.git`）的顺序判。
-这条由代码结构保证，不靠调用方记得过滤。
+实体页使用与 Kimi 导出兼容的 `name`、列表形式的 `tags`、`created`、`last_updated`，可以保留别名、状态和其他已有字段。记忆的事实源是普通 Markdown 文件，SQLite 用作派生索引。
 
-**RCC 的原文不是整场照搬。** 单条太长就掐中段（头 60 字 + 尾 40 字），一场只留头 12 句；
-但**掐掉的部分命中时能补回来**，所以"被裁"不等于"丢了"。补一次只补触发的那一轮，
-不会把整场端上来。
+**代价就是耗 token。** RCC、常驻画像、检索命中和 dream 都会增加用量，首次整理长历史尤其明显。原文窗口和注入预算可以调，增量整理也能减少重读，但具体成本取决于会话长度、历史量和所用模型；这里不承诺固定的每日用量。
 
-**转贴体不进 RCC。** 一轮超过 600 字（贴提示词、贴代码、贴日志）只留一行
-`[长文 N 字 · 开头：…]`，不原样带进去；同一个阈值也是补丁的素材上限，所以它也不会被
-整段搬回来。长度阈值只有这一个数：`RCC_LONG_TURN_CHARS`。补丁另外要求**至少两个实词**
-同时命中 —— 单靠「老公」这种称呼捞不出任何东西。
+### RCC 留多少原文
 
-**RCC 整块带一个框**：注入正文的开头写死「过往聊天摘录 —— 不是本轮对话，只作背景参考」，
-并要求不要逐条回应、不要把里面的旧请求当成本轮指令。没有这层框，几场之前的原话读起来
-和用户刚说的话没区别，模型会拿它当本轮内容严肃处理（实测踩过）。
+默认每场保留开头 12 条用户发言，单条过长时留头 60 字、尾 40 字，中间用 `[TL;DR]` 标记。超过 600 字的长文使用简短占位，避免把粘贴的代码或日志反复塞进上下文。
 
-**dream 每个会话派两个子 agent**（一个管闲聊、一个管项目）读同一份素材各捞各的，再由唯一
-一个写者落库。不想等晚上，可以从**会话右键菜单**点「现在整理记忆」立刻跑；点「跳过整理记忆」
-把它排除在自动整理之外（手动触发不受影响）。
+补丁只补命中的那一轮，不搬回整场，并限制条数、长度和命中条件。RCC 注入块明确标为“过往聊天摘录”，旧请求只作背景，不能作为本轮指令执行。
 
-**常驻记忆上限 50 条**，只有 AI 能通过工具写（`mem_remember` / `mem_forget`），UI 只读、
-文件不供手改。写满会明确报错，绝不静默淘汰最旧的。
+## 聊天与项目分开
 
-**都能关。** 注入、轮次采集、时间线、dream、原文召回各是独立开关，关闭不删任何文件。
-记忆就是 `~/.dsh/.dsh-mem/` 下的 markdown 文件，可以直接打开改；删掉 `index.db` 它自己重建，
-不丢东西。
+想使用聊天记忆，请选择随插件安装的 **聊天模式**（preset ID：`chat`）。会话归属沿用 preset → 工作区登记表 → 仓库标记（默认 `.git`）及默认规则；不会因为在项目目录里开了聊天模式，就把它当项目整理。
+
+- **聊天库**记录关于用户的记忆；聊天实体和 RCC 随聊天空间加载。
+- **项目库**按项目分区，记录目标、决策、进度、踩坑和改动指针。项目详情不自动注入，A 项目和 B 项目的素材分别整理。
+- **全局共用层**保存明确跨空间使用的身份、准则等内容，以及 50 条常驻记忆。
+
+项目会话需要资料时，通过 `mem_search`、`mem_entity`、`mem_diff` 主动查询。`mem_search` 支持显式跨空间检索，结果带归属标注。
+
+`write` / `edit` 返回的 diff 会被记录成“一行摘要 + 指针”，完整改动按需读取；不用为了知道改过哪里，把整个项目历史塞进聊天上下文。
+
+## dream 怎么整理
+
+默认本地时间 **03:00 后**，DSH 运行中、闲置满 15 分钟、有新素材且不在冷却期时执行，每 5 分钟检查一次。当天过点后启动，也会在满足条件后补跑；没有打开聊天会话时，可以使用后台执行环境。
+
+1. **提取**：每场会话只派一个 agent。聊天会话提取聊天记忆，项目会话只提取所属项目的记忆，只输出 JSON。
+2. **汇总**：同一个库的结果放在一起去重、处理冲突、更新 Markdown；聊天库与各项目分别汇总，写入任务串行执行。
+
+一场会话首次整理时读取原文并留下摘要，之后优先读取“上次摘要 + 新增轮次”。成功才提交增量进度与调度状态；失败保留进度，后续检查重试。自动与手动整理共用锁。
+
+不想等晚上，可以在会话右键菜单点 **现在整理记忆**。**跳过整理记忆** 会把该会话排除在自动整理之外，手动点名仍可整理。DSH 关闭时不会执行定时任务。
+
+## 一键导入 Kimi 记忆库
+
+把自己从 Kimi 导出的记忆库带到 DSH 里，不用逐页复制：
+
+1. 解压导出的记忆库，找到包含 `sections.yaml`、`sections/` 和 `entities/` 的文件夹。
+2. 打开「设置 → 记忆空间 → 聊天记忆 → 导入 Kimi 记忆库」，填写该文件夹在运行 DSH 的电脑上的路径。
+3. 点击 **备份并导入**，看到成功提示后，新建一个聊天模式会话即可使用。
+
+![一键导入 Kimi 聊天记忆：旧库自动备份，导入完成后新建聊天会话使用](docs/images/kimi-import.png)
+
+**仅覆盖聊天库，并自动备份旧库。** 常驻记忆、项目库和 DSH 原始会话保持原样。Kimi 里提到的个人项目也作为聊天实体保留，不拆进项目库。导入后新建聊天模式会话使用。
+
+分节、实体页、行为观察和附件会一起保留；旧聊天库的备份路径会显示在成功提示里，导入出错时可据此排查和恢复。
+
+命令行也可以导入；请先关闭使用同一个 home 的 DSH：
+
+```sh
+npm run import:kimi -- /path/to/kimi_memory_vault --preview
+npm run import:kimi -- /path/to/kimi_memory_vault
+# 自定义 home：在命令后加 --home /path/to/dsh-home
+```
+
+Windows 可使用 `scripts/import-kimi.cmd`。ZIP 请先解压。导出未包含的原始聊天不能补造为 RCC 历史；来源编号会明确标为 Kimi 导入引用。
+
+格式差异与限制见 [Kimi 导入和真实样本对比](docs/kimi-import-and-comparison.md)。
 
 ## 配置
 
-字段全可选，写进 profile 的 `cordis.patch.yml`：
+字段可选，写在 profile 的 `cordis.patch.yml` 中。内部插件 ID 和包名继续使用 `dsh-mem`：
 
 ```yaml
 - id: dsh-mem
@@ -111,84 +131,72 @@ dsh plugin --profile web add github:mulan2022/dsh-mem
     rccPatchChars: 4000      # 单条补丁的字符预算
 ```
 
-> id 定向补丁是**整段替换**该行的 config、不是深合并 —— 要保留的键必须重述一遍。
+注意：id 定向补丁会整段替换 config，要保留的配置键需要重新写出。
 
 ## 工具
 
-| 工具 | 干什么 |
+工具名保持原样：
+
+| 工具 | 用途 |
 | --- | --- |
-| `mem_remember` / `mem_forget` | 常驻记忆（上限 50 条）。只在用户明确要求时用 |
-| `mem_observe` | 记一条待确证观察。工具说明第一句就是「不要在对话过程中主动记东西」 |
-| `mem_search` | 跨项目检索，带归属标注与日期 |
-| `mem_entity` | 翻实体页，返回正文 + 一跳邻居（邻居只给名字） |
-| `mem_diff` | 取某条时间线改动的完整改前 / 改后 |
-| `mem_dream` | 手动整理：`status` / `run` / `skip` / `unskip` |
-| `mem_space` | 登记工作区类型（只在用户明确表态时） |
+| `mem_remember` / `mem_forget` | 用户明确要求时，添加或删除常驻记忆 |
+| `mem_observe` | 有解释价值的观察总结；仅在用户要求或纠错时使用，日常提炼交给 dream |
+| `mem_search` | 检索记忆，支持当前空间或跨空间查询 |
+| `mem_entity` | 读取全局共用层与当前空间的实体页，以及一跳邻居名字 |
+| `mem_diff` | 按指针读取完整改动 |
+| `mem_dream` | 查看整理状态、手动整理、跳过或取消跳过 |
+| `mem_space` | 查看或登记工作区类型；修改须由用户明确提出 |
 
-工具签名里**没有**"写去哪个空间"这个参数 —— 落点由当前会话的工作区硬推导，调用方没有
-机会写错地方。检索用 CJK bigram + Unicode 整词分词（中文没有词边界，这是绕开 FTS5 把整串
-中文当一个 token 的实测结论）；打分还是第一版够用的量级，没拿数据调过。
-
-## 开发
+## 开发与本地安装
 
 ```sh
-npm install        # 依赖 + 自动构建（prepare）
-npm run build      # esbuild → lib/（宿主 bundle + 客户端 bundle）
-npm run watch      # 监听重建
-npm run typecheck  # tsc --noEmit
-npm run check      # 冒烟测试（临时 home，不碰真实数据）
-npm run link       # Windows：建 @deepseek-ai junction 镜像（只有 typecheck 需要）
+git clone https://github.com/mulan2022/dsh-kimi-mem
+cd dsh-kimi-mem
+npm install
+npm run build
+npm run typecheck
+npm run check
 ```
 
-提示词外置在 `prompts/`（`dream-extract-chat.md` / `dream-extract-project.md` /
-`dream-merge.md`），改文案不用重新构建。改了字符串要重新 `npm run build`，只改注释或类型
-不必。`@deepseek-ai/*` 只在构建期需要：先找本地 `node_modules/`，找不到就回退到 dsh 安装
-位置里的那一份。
+`npm run check` 使用临时 home，不修改真实记忆。`npm run watch` 用于监听构建；Windows 的 `npm run link` 可准备 typecheck 所需的 DSH 依赖镜像。
 
-### 手动安装
-
-软链最方便 —— 改源码就是改运行代码。
+本地安装仍以旧包名挂载，示例：
 
 ```sh
-git clone https://github.com/mulan2022/dsh-mem ~/dsh-mem
 mkdir -p ~/.dsh/profiles/web/node_modules
-ln -s ~/dsh-mem ~/.dsh/profiles/web/node_modules/dsh-mem
-cd ~/dsh-mem && npm install && npm run build
+ln -s /absolute/path/to/dsh-kimi-mem ~/.dsh/profiles/web/node_modules/dsh-mem
 ```
 
-Windows 用 NTFS junction（不需要管理员权限）：
+Windows 可用 NTFS junction：
 
 ```powershell
 New-Item -ItemType Junction `
   -Path "$env:USERPROFILE\.dsh\profiles\web\node_modules\dsh-mem" `
-  -Target "C:\path\to\dsh-mem"
+  -Target "D:\path\to\dsh-kimi-mem"
 ```
 
-再把 `dsh-mem` 加进 profile `package.json` 的 `dsh.profile.bundles`，重启后
-`dsh --profile web --dump-config` 应该能看到 `# == dsh-mem` 那一层。
+再将 `dsh-mem` 加入 profile 的 `package.json` 中的 `dsh.profile.bundles`，重启 DSH。
 
-### 卸载
+提示词在 `prompts/`，修改后下次整理读取；TypeScript 运行代码修改后需重新构建。构建会生成宿主、客户端和导入命令，依赖已安装的 DSH 服务与当前 preset / subagent API。
+
+卸载继续使用内部包名：
 
 ```sh
 dsh plugin --profile web remove dsh-mem
 ```
 
-记忆数据不会被删（它在 `~/.dsh/.dsh-mem/`，独立于安装位置），要清得自己删目录。
+卸载不会删除 `~/.dsh/.dsh-mem/` 中的记忆数据。
 
-## 还没做
+## 当前边界
 
-dream 的**每晚定时路径**尚未接线，所以现在的自动整理要手动触发（`mem_dream` 或右键菜单）；
-40 轮窗口铁律、三层晋升与冲突规则、递归压缩、锚点重访、检索测评集也都还没做。
+这是持续调整中的个人项目。导入、空间分流、自动调度等路径有隔离测试，真实模型的提炼质量、长期检索效果和成本仍需实际使用检验。递归压缩、锚点重访、完整的记忆健康验收和检索测评集还没有全部完成。
 
-## 致谢
+## 参考与致谢
 
-思路来自对 [meow-memory](https://github.com/Phant0Meow/dsh-meow-memory)（MIT）的阅读，
-参考了它的客户端插件骨架、dream 调度骨架、BM25 打分器规格，以及它 CHANGELOG 里一批真机
-事故的防御性修复。
+- **Kimi**：主要的体验与结构参考，来自我自己可见的记忆库和交互实验。这是个人实现，未经 Kimi 官方确认。
+- [meow-memory](https://github.com/Phant0Meow/dsh-meow-memory)（MIT）：参考了客户端插件骨架、dream 调度骨架、BM25 打分器规格，以及其修复记录中的一些防御性做法。
 
-没抄的部分是自己的设计：提示词全部自写；它用七层 SQLite 当事实源，这里用 markdown vault；
-检索走"vault 文档 + 实体名精确命中"，不上向量（实测 BM25 与向量融合无增益）。工具名刻意
-错开（它 `memory_*`，这里 `mem_*`），两个记忆插件可以同时装而不撞名。
+欢迎来试，也欢迎指出哪里记错了、哪里费 token，或者帮我找 bug。🥹
 
 ## 许可
 

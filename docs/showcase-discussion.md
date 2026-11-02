@@ -1,20 +1,22 @@
+> 名称已更新为 dsh-kimi-mem；以下保留早期发布稿，历史 token 与兼容版本数据不代表当前实测。最新说明以 README 为准。
+
 # Discussion post — “Show Your Plugins!”
 
 准备贴到 <https://github.com/deepseek-ai/deepseek-harness/discussions/new?category=show-your-plugins>
 
 **标题（英文版，推荐）：**
 
-> dsh-mem — cross-session memory for DSH as a plain markdown vault (hard project partitions, no vector DB)
+> dsh-kimi-mem — cross-session memory for DSH as a plain markdown vault (hard project partitions, no vector DB)
 
 **标题备选：**
 
-> dsh-mem — memory that lives in markdown files you can read and edit
+> dsh-kimi-mem — memory that lives in markdown files you can read and edit
 
 **图片**：GitHub 的输入框不认本地路径。两种办法选一种 ——
 
 1. 在编辑器里直接**把 `dsh-mem/docs/images/memory-space.png` 和 `chat-mode.png` 拖进正文**（GitHub 会自动上传，最稳）；
 2. 或者用仓库里的 raw 链接（仓库得是公开的、图已 push 到 `main`）：
-   `https://raw.githubusercontent.com/mulan2022/dsh-mem/main/docs/images/memory-space.png`
+   `https://raw.githubusercontent.com/mulan2022/dsh-kimi-mem/main/docs/images/memory-space.png`
 
 下面两版正文按需取用。英文版放前面，中文版在后面，**不要一起贴**。
 
@@ -22,14 +24,14 @@
 
 ## English version
 
-**dsh-mem** gives DSH a memory that survives across sessions — stored as a plain markdown vault at `~/.dsh/.dsh-mem/`, not in a database you can't read.
+**dsh-kimi-mem** gives DSH a memory that survives across sessions — stored as a plain markdown vault at `~/.dsh/.dsh-mem/`, not in a database you can't read.
 
-![Memory space: resident / chat / project memory](https://raw.githubusercontent.com/mulan2022/dsh-mem/main/docs/images/memory-space.png)
+![Memory space: resident / chat / project memory](https://raw.githubusercontent.com/mulan2022/dsh-kimi-mem/main/docs/images/memory-space.png)
 
 ### Install
 
 ```sh
-dsh plugin --profile web add github:mulan2022/dsh-mem
+dsh plugin --profile web add github:mulan2022/dsh-kimi-mem
 ```
 
 Restart `dsh web`. That's it — no config file to write, no service to run.
@@ -80,14 +82,14 @@ MIT. Ideas borrowed from [meow-memory](https://github.com/Phant0Meow/dsh-meow-me
 
 ## 中文版
 
-**dsh-mem** 给 DSH 加一层跨会话记忆 —— 事实源是 `~/.dsh/.dsh-mem/` 下的**普通 markdown 文件**，不是一个你打不开的数据库。
+**dsh-kimi-mem** 给 DSH 加一层跨会话记忆 —— 事实源是 `~/.dsh/.dsh-mem/` 下的**普通 markdown 文件**，不是一个你打不开的数据库。
 
-![记忆空间：常驻记忆 / 聊天记忆 / 项目记忆](https://raw.githubusercontent.com/mulan2022/dsh-mem/main/docs/images/memory-space.png)
+![记忆空间：常驻记忆 / 聊天记忆 / 项目记忆](https://raw.githubusercontent.com/mulan2022/dsh-kimi-mem/main/docs/images/memory-space.png)
 
 ### 装
 
 ```sh
-dsh plugin --profile web add github:mulan2022/dsh-mem
+dsh plugin --profile web add github:mulan2022/dsh-kimi-mem
 ```
 
 重启 `dsh web` 即可。不用写配置文件，也不用另起服务。

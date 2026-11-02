@@ -109,6 +109,12 @@ walk(linkOut);
 check('解析出 2 个链接', anchors.length === 2, String(anchors.length));
 anchors[0]?.props?.onClick?.();
 check('点击回调带出实体名', clicked[0] === '攀岩项目', JSON.stringify(clicked));
+const pathLink = renderFileBody('index.md', '[[entities/tool|工具别名]]\n', n => clicked.push(n));
+const previousCount = anchors.length;
+walk(pathLink);
+check('Kimi 双链显示别名', anchors[previousCount]?.children?.includes('工具别名'));
+anchors[previousCount]?.props?.onClick?.();
+check('Kimi 双链回调保留路径', clicked.at(-1) === 'entities/tool');
 
 // 列表里的链接也要能点（不能只处理段落）
 const listLink = renderFileBody('s.md', '- 相关：[[高斯泼溅]]\n');

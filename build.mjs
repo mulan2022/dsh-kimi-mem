@@ -122,5 +122,7 @@ if (watch) {
   cpSync(new URL('./src/templates', import.meta.url), new URL('./lib/templates', import.meta.url), {
     recursive: true,
   });
-  await Promise.all([build(hostOptions), build(clientOptions)]);
+  await Promise.all([build(hostOptions), build(clientOptions), build({
+    ...hostOptions, entryPoints: ['src/import-kimi-cli.ts'], outfile: 'lib/import-kimi.js',
+  })]);
 }

@@ -11,19 +11,20 @@
 | `index.md` | 自动生成：sections 与 entities 索引 |
 | `sections/` | 分区正文，定义见 `sections.yaml` |
 | `entities/` | 人、关系、兴趣、概念、事件各一页 |
-| `observations.md` | **暂存区**：信号还不够强，等后续 dream 确证后才晋升 |
+| `observations.md` | 模型对用户行为方式的观察总结：情境、模式、证据、适用边界与反例 |
 | `log.md` | dream 审计日志 |
 | `raw/` | 原始素材，未加工 |
 
-## 三层置信度
+## 按用途分流
 
 ```
-raw/  →  observations.md  →  sections/ + entities/
-原始      暂存（不进 README）    确证（进 README，参与常驻注入）
+原始轮次 → RCC / BM25 按需召回
+有解释价值的行为模式 → observations.md
+值得整理的身份事实、稳定画像、实体资料 → sections/ + entities/
 ```
 
 **`observations.md` 里的内容不会被主动注入**，只在检索命中时被读到。
-这条是为了防止"一次性的随口一提"污染长期画像。
+观察本身就是记忆，并非等待晋升的低置信度事实。没有提炼价值的碎屑留在原始素材中，不另写观察；稳定且值得常驻的总结可由 dream 归纳进 sections，不要求所有材料先经过 observations。
 
 ## 引用
 

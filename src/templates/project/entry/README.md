@@ -12,7 +12,7 @@
 | `timeline.md` | **项目时间线**，一轮一行摘要 + `[→ id]` 指针 |
 | `sections/` | 正文，定义见 `sections.yaml`（目标 / 待办 / 架构 / 决策 / 踩坑） |
 | `entities/` | **这个项目内部**的模块、外部依赖、协作者 |
-| `observations.md` | 暂存区，未确证 |
+| `observations.md` | 本项目有复用价值的工程判断与协作模式，不收留流水账或聊天画像 |
 | `log.md` | 整理（dream）的审计日志 |
 | `raw/` | 原始素材；`raw/timeline/` 存完整改动、`raw/anchors.jsonl` 存来源锚点 |
 

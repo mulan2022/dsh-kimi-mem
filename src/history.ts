@@ -19,6 +19,7 @@ import { dirname, join } from 'node:path';
 import { zstdDecompressSync } from 'node:zlib';
 
 import { historyStatePath, sessionsRootDir } from './paths.js';
+import { resolveWorkspace } from './workspaces.js';
 import {
   appendTurn,
   collectTurn,
@@ -93,6 +94,7 @@ export interface SessionLog {
   path: string;
   size: number;
   cwd: string | null;
+  agentPreset?: string;
   createdAt: number | null;
   /**
    * `session` 事件里的 `delegationDepth`：**> 0 就是子代理会话**。
@@ -165,6 +167,7 @@ export function listSessionLogs(home: string): SessionLog[] {
           path,
           size,
           cwd: typeof head?.cwd === 'string' ? head.cwd : null,
+          ...(head?.agentPreset ? { agentPreset: head.agentPreset } : {}),
           createdAt:
             typeof head?.createdAt === 'number'
               ? head.createdAt
@@ -338,7 +341,7 @@ export interface BackfillReport {
  *  - **日志字节数没变就跳过**（账本记在 `raw/history-state.json`）—— 否则每次启动都要
  *    解压几十 MB。日志是 append-only，所以"大小没变"就等于"没有新轮次"。
  */
-export function backfillRawTurns(home: string): BackfillReport {
+export function backfillRawTurns(home: string, markers: readonly string[] = ['.git']): BackfillReport {
   const report: BackfillReport = { scanned: 0, skipped: 0, added: 0, touched: 0, pruned: 0, failed: [] };
   const state = readHistoryState(home);
   let logs: SessionLog[];
@@ -376,7 +379,7 @@ export function backfillRawTurns(home: string): BackfillReport {
     }
     try {
       const have = new Set(readTurns(home, log.session).map((t) => t.turn));
-      const space: TurnRecord['space'] = log.cwd === null ? 'chat' : 'project';
+      const space = resolveWorkspace(home, log.cwd, markers, log.agentPreset ?? null).kind;
       let added = 0;
       for (const slice of turnSlices(readSessionEvents(log.path))) {
         const startTime = slice[0]?.time;
@@ -388,6 +391,7 @@ export function backfillRawTurns(home: string): BackfillReport {
           home,
         });
         if (rec === null) continue;
+        if (log.agentPreset) rec.agentPreset = log.agentPreset;
         if (rec.turn !== null && have.has(rec.turn)) continue; // 只补缺
         if (appendTurn(home, rec)) added++;
       }

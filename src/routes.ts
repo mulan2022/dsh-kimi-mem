@@ -26,6 +26,7 @@ interface RouteRegistrar {
 }
 
 interface NodeReq {
+  headers?: Record<string, string | string[] | undefined>;
   method?: string;
   url?: string;
   on?(event: string, listener: (chunk?: unknown) => void): void;
@@ -112,7 +113,7 @@ export function resolveSpaceDir(api: VaultApi, space: string): string | null {
 /**
  * dream 的控制面（会话右键菜单用）。
  *
- * 这是本插件**唯一一组写路由** —— 与「常驻记忆只读」并不矛盾：常驻记忆的正文
+ * 这是 dream 调度的写路由（另有用户触发的聊天库导入路由） —— 与「常驻记忆只读」并不矛盾：常驻记忆的正文
  * 只有 `mem_remember` / `mem_forget` 能改，而这里改的是**整理调度**（跳过名单 / 现在跑一次），
  * 不是记忆内容。清单本身仍然落在 `state.json`，AI 侧走 `mem_dream` 工具，
  * 两条入口共用 `dream.ts` 同一套读写。
@@ -136,6 +137,7 @@ export interface DreamRoutesApi {
  * 这里只负责把它读出来给 UI。
  */
 export interface VaultRoutesExtras {
+  importKimi?: (source: string) => unknown;
   /** 工作区登记视图（只读）。 */
   workspaceView?: () => unknown;
   /** dream 控制面；未配置时相关路由返回明确原因，而不是 404。 */
@@ -143,7 +145,7 @@ export interface VaultRoutesExtras {
 }
 
 /**
- * 注册读路由。带重试：webServer 未就绪时每秒重试，最长 20 秒。
+ * 注册记忆空间路由。带重试：webServer 未就绪时每秒重试，最长 20 秒。
  *
  * @returns 注销函数（幂等）
  */
@@ -157,6 +159,24 @@ export function registerVaultRoutes(
   let stopped = false;
 
   const routes = [
+    {
+      path: `${PREFIX}/import-kimi`,
+      handler: (req: unknown, res: unknown) => {
+        const r = req as NodeReq;
+        if (r.method !== 'POST') return writeJson(res, 405, { ok: false, error: 'POST required' });
+        // Custom header prevents cross-origin form submissions; no CORS permission is granted.
+        if (r.headers?.['x-dsh-mem-import'] !== 'overwrite-chat') return writeJson(res, 403, { ok: false, error: 'missing import intent' });
+        void readJsonBody(req).then(body => {
+          try {
+            if (!extras.importKimi) throw new Error('导入服务未就绪');
+            if (typeof body.source !== 'string' || !body.source.trim()) throw new Error('请填写服务器上的解压目录');
+            writeJson(res, 200, { ok: true, report: extras.importKimi(body.source.trim()) });
+          } catch (error) {
+            writeJson(res, 400, { ok: false, error: error instanceof Error ? error.message : String(error) });
+          }
+        });
+      },
+    },
     {
       path: `${PREFIX}/overview`,
       handler: (_req: unknown, res: unknown) => writeJson(res, 200, api.overview()),
@@ -197,6 +217,7 @@ export function registerVaultRoutes(
           kind: e.kind,
           status: e.status,
           aliases: e.aliases,
+          tags: e.tags,
         }));
         writeJson(res, 200, { ok: true, space, entities });
       },

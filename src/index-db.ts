@@ -177,25 +177,48 @@ export function kindOf(rel: string): string {
  * ---
  * ```
  *
- * 只支持扁平的 `key: value`。刻意不引 YAML 依赖 —— 我们自己的格式够简单，
+ * 支持扁平标量和 Kimi 风格的缩进字符串列表，不解析嵌套 YAML 对象。
+ * 刻意不引 YAML 依赖 —— 我们自己的格式够简单，
  * 而引入完整 YAML 解析器只为了读几个标量不划算。
  */
 export function parseFrontMatter(text: string): {
   attrs: Record<string, string>;
+  lists: Record<string, string[]>;
   body: string;
 } {
-  if (!text.startsWith('---')) return { attrs: {}, body: text };
+  if (!/^---\r?\n/.test(text)) return { attrs: {}, lists: {}, body: text };
   const end = text.indexOf('\n---', 3);
-  if (end < 0) return { attrs: {}, body: text };
+  if (end < 0) return { attrs: {}, lists: {}, body: text };
   const head = text.slice(3, end);
   const body = text.slice(end + 4).replace(/^\r?\n/, '');
   const attrs: Record<string, string> = {};
+  const lists: Record<string, string[]> = {};
+  let listKey: string | null = null;
+  const unquote = (value: string): string => {
+    const v = value.trim();
+    if (v.startsWith('"') && v.endsWith('"')) {
+      try { return JSON.parse(v) as string; } catch { return v.slice(1, -1); }
+    }
+    return v.startsWith("'") && v.endsWith("'") ? v.slice(1, -1).replace(/''/g, "'") : v;
+  };
   for (const line of head.split(/\r?\n/)) {
-    const m = /^([A-Za-z_][\w-]*)\s*:\s*(.*)$/.exec(line.trim());
+    if (!line.trim() || /^\s*#/.test(line)) continue;
+    const item = /^\s+-\s+(.+?)\s*$/.exec(line);
+    if (item && listKey) {
+      const value = unquote(item[1]);
+      if (value) lists[listKey].push(value);
+      continue;
+    }
+    const m = /^([A-Za-z_][\w-]*)\s*:\s*(.*)$/.exec(line);
+    listKey = null;
     if (!m) continue;
-    attrs[m[1]] = m[2].replace(/^['"]|['"]$/g, '').trim();
+    attrs[m[1]] = unquote(m[2]);
+    if (m[2].trim() === '') {
+      listKey = m[1];
+      lists[listKey] = [];
+    }
   }
-  return { attrs, body };
+  return { attrs, lists, body };
 }
 
 /** 从内容中提取 `[[双链]]` 目标（图谱边）。 */

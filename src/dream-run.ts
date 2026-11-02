@@ -4,15 +4,15 @@
  * 两段式（设计文档 §5.6.2）：
  *
  * ```
- * 阶段 A（并行 · 只读）   每个会话两个 agent：闲聊 + 项目
- *        读同一份未归属素材，各捞各的，只吐 JSON，**不写任何文件**
+ * 阶段 A（并行 · 只读）   每个会话一个 agent：按会话空间选聊天或项目
+ *        只读该会话素材，只吐 JSON，**不写任何文件**
  *              │  等全部收齐
  *              ▼
- * 阶段 B（串行 · 唯一写者） 一个 agent，按 space 归拢落库
+ * 阶段 B（串行 · 唯一写者） 每个目标 vault 一个汇总任务，串行落库
  * ```
  *
  * **"怎么派 agent"被抽成 `spawn` 回调** —— 编排层因此不依赖 `ctx.subagents`，
- * 能用假的 spawn 完整单测（测"两个 agent 各捞各的""坏 JSON 不炸整轮""编造的锚点被丢掉"）。
+ * 能用假的 spawn 完整单测（测"会话按空间单路提取""坏 JSON 不炸整轮""编造的锚点被丢掉"）。
  * 真实实现由调用方给：手动触发时用**当前会话的 agent** 当 parent，
  * 定时触发时得先 `agents.create` 造一个（凌晨没有活会话）。
  */
@@ -36,7 +36,15 @@ import {
   type TurnWindow,
 } from './compacts.js';
 import { localDate } from './markdown.js';
-import { readTurns } from './turns.js';
+import { readTurns, type TurnRecord } from './turns.js';
+import { join } from 'node:path';
+import { spaceDir } from './paths.js';
+
+export interface DreamTarget {
+  kind: ExtractKind;
+  dir: string;
+  projectName: string | null;
+}
 
 /** 一次"派个 agent 去干活"的请求。 */
 export interface DreamSpawnRequest {
@@ -56,6 +64,7 @@ export interface DreamRunDeps {
   template: (name: string) => string;
   /** 目标项目名（项目记忆侧的路标）；聊天侧为 null。 */
   projectName?: string | null;
+  resolveSession?: (session: string, turns: readonly TurnRecord[]) => DreamTarget;
 }
 
 /** 阶段 A 要派的两类 agent。 */
@@ -70,6 +79,7 @@ export function buildExtractPrompt(
     session: string;
     kind: ExtractKind;
     projectName: string | null;
+    vaultDir?: string;
     /** 上次留的对话摘要（有它才走增量）。 */
     digest?: SessionCompact;
     /** 只含新增轮次的窗口文件。 */
@@ -90,6 +100,7 @@ export function buildExtractPrompt(
       ? `- 你的那份素材（**增量窗口**，只含新增轮次）：\`${(args.window as TurnWindow).path.replace(/\\/g, '/')}\``
       : `- 你的那份原始轮次（**整场**）：\`${turnsPath}\``,
     `- 你负责的空间：\`${args.kind}\``,
+    ...(args.vaultDir ? [`- 唯一目标记忆库：\`${args.vaultDir.replace(/\\/g, '/')}\`；只整理本会话所属空间，不为另一空间提取内容。`] : []),
     args.kind === 'project'
       ? `- 项目名：\`${args.projectName ?? '(未知)'}\``
       : '- 项目名：（不适用 —— 你是闲聊 agent）',
@@ -118,7 +129,7 @@ export function buildExtractPrompt(
 /** 阶段 B 的提示词：把各空间归拢好的材料交给写者。 */
 export function buildMergePrompt(
   template: string,
-  args: { home: string; extracts: readonly ExtractResult[]; now: Date },
+  args: { home: string; extracts: readonly ExtractResult[]; now: Date; target?: DreamTarget },
 ): string {
   const bySpace = groupBySpace(args.extracts);
   // 「本月」的滚动要靠它 —— 不注入日期，agent 只能靠感觉判断"现在是不是新的一个月"。
@@ -152,13 +163,14 @@ export function buildMergePrompt(
     '## 本次任务（具体路标）',
     '',
     `- 素材根目录：\`${args.home}/.dsh-mem/raw/turns/\``,
+    ...(args.target ? [`- **本次只写这一个 vault：\`${args.target.dir.replace(/\\/g, '/')}\`**；space=${args.target.kind}，project=${JSON.stringify(args.target.projectName)}。不得访问或修改其他聊天/项目库及 shared。`] : []),
     `- **今天：${today}** —— 所以「本月」= \`${thisMonth}\`。` +
       '跨月时要把「本月」里已经过去的月份滚进「早期月份」（见提示词正文）。',
-    '- 两批 agent 的产出（已经过宿主校验：编造的锚点已被剔除）：',
+    '- 本目标库所属会话的产出（已校验空间归属与锚点，不含其他库的提取结果）：',
     '',
-    block('聊天记忆（spaces/chat/）', bySpace.chat),
+    ...(args.target?.kind === 'project' ? [] : [block('聊天记忆（spaces/chat/）', bySpace.chat)]),
     '',
-    block('项目记忆（spaces/project/projects/<项目名>/）', bySpace.project),
+    ...(args.target?.kind === 'chat' ? [] : [block('项目记忆（spaces/project/projects/<项目名>/）', bySpace.project)]),
     '',
     '做完所有写入后，**只输出一个 JSON 回执**（格式见上面的提示词正文）。',
   ].join('\n');
@@ -186,74 +198,89 @@ export async function runDream(deps: DreamRunDeps, pending: readonly string[]): 
   const extracts: ExtractResult[] = [];
   const failed: string[] = [];
   let droppedForBadAnchor = 0;
+  const compacts: Array<{ session: string; kind: ExtractKind; value: SessionCompact }> = [];
 
-  // 有多少锚点可用（校验编造的锚点用）—— 两个空间各自的 vault 各读一次
-  const anchorsBySpace: Record<ExtractKind, ReturnType<typeof readAnchors>> = {
-    chat: readAnchors(`${deps.home}/.dsh-mem/spaces/chat`),
-    project: readAnchors(
-      `${deps.home}/.dsh-mem/spaces/project/projects/${deps.projectName ?? ''}`,
-    ),
-  };
+  const targets = new Map<string, DreamTarget>();
+  const extractedTargets = new Map<ExtractResult, DreamTarget>();
 
-  // ── 阶段 A：每个会话 × 两个空间 ──
+  // ── 阶段 A：每个会话只派一个与空间相符的提取者 ──
   const jobs: Array<Promise<void>> = [];
   for (const session of pending) {
-    for (const kind of EXTRACT_KINDS) {
-      jobs.push(
-        (async () => {
-          const label = `dream:${kind}:${session.slice(0, 8)}`;
-          let text = '';
-          // 增量：上次留过摘要就只喂「摘要 + 第 N 轮之后的新增」，没留过就整场读（现状）
-          const prev = readCompact(deps.home, session, kind);
-          const window =
-            prev === null
-              ? null
-              : writeTurnWindow(deps.home, session, kind, prev.coveredThroughTurn);
-          try {
-            text = await deps.spawn({
-              label,
-              prompt: buildExtractPrompt(deps.template(`dream-extract-${kind}`), {
-                home: deps.home,
-                session,
-                kind,
-                projectName: deps.projectName ?? null,
-                ...(prev === null ? {} : { digest: prev }),
-                ...(window === null ? {} : { window }),
-              }),
-            });
-          } catch (e) {
-            failed.push(`${label}（抛出：${e instanceof Error ? e.message : String(e)}）`);
-            return;
-          }
-          const report = validateExtract(extractJson(text), session);
-          if (!report.ok || report.result === null) {
-            failed.push(`${label}（${report.errors.join('；')}）`);
-            return;
-          }
-          // 顺便留下这次的对话摘要 —— 下一晚就可以只喂增量。
-          // **覆盖轮次由宿主盖章**（agent 只出文本）：让它自己报轮号是白送一个失败模式。
-          const digest = report.result.raw.digest;
-          if (typeof digest === 'string' && digest.trim() !== '') {
-            writeCompact(deps.home, session, kind, {
-              coveredThroughTurn: maxTurnOf(deps.home, session),
-              at: new Date().toISOString(),
-              text: digest,
-            });
-          }
-          // 编造的锚点 → 那一条不要（设计里的硬规矩：没出处的记忆不如不记）
-          const bad = new Set(missingAnchors(report.result, anchorsBySpace[report.result.space]));
-          if (bad.size > 0) {
-            const before = report.result.observations.length;
-            report.result.observations = report.result.observations.filter(
-              (o) => o.anchor === null || !bad.has(o.anchor),
-            );
-            droppedForBadAnchor += before - report.result.observations.length;
-            deps.logger.warn(`${label}: 丢掉 ${bad.size} 个编造的锚点 [${[...bad].join(',')}]`);
-          }
-          extracts.push(report.result);
-        })(),
-      );
+    let target: DreamTarget;
+    try {
+      const turns = readTurns(deps.home, session);
+      const last = turns.at(-1);
+      if (deps.resolveSession) target = deps.resolveSession(session, turns);
+      else if (last?.space === 'chat' || last?.agentPreset === 'chat') target = { kind: 'chat', dir: spaceDir(deps.home, 'chat'), projectName: null };
+      else throw new Error('缺少可靠的项目归属解析，拒绝猜测目标库');
+      if (target.kind === 'project' && !target.projectName) throw new Error('项目记忆缺少目标项目');
+      targets.set(target.dir, target);
+    } catch (error) {
+      failed.push(`${session}：${String(error)}`);
+      continue;
     }
+    const kind = target.kind;
+    jobs.push(
+      (async () => {
+        const label = `dream:${kind}:${session.slice(0, 8)}`;
+        let text = '';
+        const throughTurn = maxTurnOf(deps.home, session);
+        // 增量：上次留过摘要就只喂「摘要 + 第 N 轮之后的新增」，没留过就整场读（现状）
+        const prev = readCompact(deps.home, session, kind);
+        const window =
+          prev === null
+            ? null
+            : writeTurnWindow(deps.home, session, kind, prev.coveredThroughTurn);
+        try {
+          text = await deps.spawn({
+            label,
+            prompt: buildExtractPrompt(deps.template(`dream-extract-${kind}`), {
+              home: deps.home,
+              session,
+              kind,
+              projectName: target.projectName,
+              vaultDir: target.dir,
+              ...(prev === null ? {} : { digest: prev }),
+              ...(window === null ? {} : { window }),
+            }),
+          });
+        } catch (e) {
+          failed.push(`${label}（抛出：${e instanceof Error ? e.message : String(e)}）`);
+          return;
+        }
+        const report = validateExtract(extractJson(text), session);
+        if (!report.ok || report.result === null) {
+          failed.push(`${label}（${report.errors.join('；')}）`);
+          return;
+        }
+        if (report.result.session !== session || report.result.space !== kind || report.result.project !== target.projectName) {
+          failed.push(`${label}（输出的会话/空间/项目与指定目标不一致）`);
+          return;
+        }
+        // 顺便留下这次的对话摘要 —— 下一晚就可以只喂增量。
+        // **覆盖轮次由宿主盖章**（agent 只出文本）：让它自己报轮号是白送一个失败模式。
+        const digest = report.result.raw.digest;
+        if (typeof digest === 'string' && digest.trim() !== '') {
+          compacts.push({ session, kind, value: {
+            coveredThroughTurn: throughTurn,
+            at: new Date().toISOString(),
+            text: digest,
+          } });
+        }
+        // 编造的锚点 → 那一条不要（设计里的硬规矩：没出处的记忆不如不记）
+        const bad = new Set(missingAnchors(report.result, readAnchors(target.dir)));
+        if (bad.size > 0) {
+          const before = report.result.observations.length;
+          report.result.observations = report.result.observations.filter(
+            (o) => o.anchor === null || !bad.has(o.anchor),
+          );
+          droppedForBadAnchor += before - report.result.observations.length;
+          deps.logger.warn(`${label}: 丢掉 ${bad.size} 个编造的锚点 [${[...bad].join(',')}]`);
+        }
+        extracts.push(report.result);
+        extractedTargets.set(report.result, target);
+      })(),
+    );
   }
   await Promise.all(jobs); // barrier
 
@@ -270,26 +297,40 @@ export async function runDream(deps: DreamRunDeps, pending: readonly string[]): 
 
   // ── 阶段 B：唯一写者 ──
   try {
-    const receipt = await deps.spawn({
-      label: 'dream:merge',
-      prompt: buildMergePrompt(deps.template('dream-merge'), {
-        home: deps.home,
-        extracts,
-        now: new Date(),
-      }),
-    });
-    const parsed = extractJson(receipt);
-    if (parsed === null) {
-      // 文件可能已经写了，但回执读不出来 —— 记失败，下轮重来（宁可重也不静默）
-      deps.logger.warn('dsh-mem: 阶段 B 的回执不是 JSON，按失败处理');
-      return { outcome: 'error', sessions: [...pending], extracts: extracts.length, observations, droppedForBadAnchor, failed };
+    // Group and merge each target vault separately, serially, to avoid cross-space context mixing.
+    for (const target of targets.values()) {
+      const ownExtracts = extracts.filter(extract => extractedTargets.get(extract)?.dir === target.dir);
+      if (!ownExtracts.length) continue;
+      const receipt = await deps.spawn({
+        label: 'dream:merge',
+        prompt: buildMergePrompt(deps.template('dream-merge'), {
+          home: deps.home,
+          extracts: ownExtracts,
+          now: new Date(),
+          target,
+        }),
+      });
+      const parsed = extractJson(receipt);
+      if (parsed === null) {
+        // 文件可能已经写了，但回执读不出来 —— 记失败，下轮重来（宁可重也不静默）
+        deps.logger.warn('dsh-mem: 阶段 B 的回执不是 JSON，按失败处理');
+        return { outcome: 'error', sessions: [...pending], extracts: extracts.length, observations, droppedForBadAnchor, failed };
+      }
+      deps.logger.info(`dsh-mem: 阶段 B 完成 —— ${JSON.stringify(parsed.health ?? {}).slice(0, 200)}`);
+      if ((parsed.health as { ok?: unknown } | undefined)?.ok !== true) {
+        deps.logger.warn('dsh-mem: 整理未通过完整性/健康验收，保留原进度等待重试');
+        return { outcome: 'error', sessions: [...pending], extracts: extracts.length, observations, droppedForBadAnchor, failed };
+      }
     }
-    deps.logger.info(`dsh-mem: 阶段 B 完成 —— ${JSON.stringify(parsed.health ?? {}).slice(0, 200)}`);
   } catch (e) {
     deps.logger.warn(`dsh-mem: 阶段 B 失败: ${e instanceof Error ? e.message : String(e)}`);
     return { outcome: 'error', sessions: [...pending], extracts: extracts.length, observations, droppedForBadAnchor, failed };
   }
 
+  if (failed.length > 0) return { outcome: 'error', sessions: [...pending], extracts: extracts.length, observations, droppedForBadAnchor, failed };
+
+  // Commit incremental progress only after merge succeeds; failure must not consume source material.
+  for (const compact of compacts) writeCompact(deps.home, compact.session, compact.kind, compact.value);
   return {
     outcome: 'ok',
     sessions: [...pending],
